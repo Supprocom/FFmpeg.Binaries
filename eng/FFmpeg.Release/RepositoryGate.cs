@@ -10,10 +10,11 @@ internal sealed class RepositoryGate(ProcessRunner processRunner)
         bool allowDirty,
         CancellationToken cancellationToken)
     {
-        string actualRoot = await GitValueAsync(repositoryRoot, ["rev-parse", "--show-toplevel"], cancellationToken);
-        if (!Path.GetFullPath(actualRoot).Equals(
-                Path.GetFullPath(repositoryRoot),
-                StringComparison.Ordinal))
+        string repositoryPrefix = await GitValueAsync(
+            repositoryRoot,
+            ["rev-parse", "--show-prefix"],
+            cancellationToken);
+        if (repositoryPrefix.Length != 0)
         {
             throw new ReleaseFailureException("RepositoryRootMismatch", "The release program is not running at the repository root.");
         }

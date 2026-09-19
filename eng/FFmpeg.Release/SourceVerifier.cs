@@ -56,7 +56,7 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
 
         CommandResult importKey = await processRunner.RunAsync(
             "gpg",
-            ["--batch", "--quiet", "--import", keyPath],
+            ["--batch", "--import", keyPath],
             planDirectory,
             GpgTimeout,
             gpgEnvironment,
@@ -207,7 +207,14 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
     {
         if (result.ExitCode != 0)
         {
-            throw new ReleaseFailureException(code, "A required public-source verification tool reported a failure.");
+            string diagnostic = string.Join(
+                '\n',
+                (result.StandardError + "\n" + result.StandardOutput)
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .TakeLast(20));
+            throw new ReleaseFailureException(
+                code,
+                $"A required public-source verification tool reported a failure.\n{diagnostic}");
         }
     }
 }
