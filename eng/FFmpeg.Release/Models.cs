@@ -19,6 +19,7 @@ internal sealed record VersionDefinition(
     string Tag,
     string Status,
     string ReleaseDate,
+    long? SourceDateEpoch = null,
     string? ArchiveUri = null,
     string? SignatureUri = null,
     string? ReleaseKeyUri = null,
@@ -73,6 +74,47 @@ internal sealed record SourceVerificationResult(
     string SourceCommit,
     string TagObject);
 
+internal sealed record WorkerFile(
+    string Path,
+    long Size,
+    string Sha256,
+    string Mode);
+
+internal sealed record WorkerManifest(
+    int SchemaVersion,
+    string PlanSha256,
+    string Version,
+    string SourceCommit,
+    string ArchiveSha256,
+    string Flavor,
+    string RuntimeIdentifier,
+    string Worker,
+    string ConfigureArgumentsSha256,
+    IReadOnlyList<string> ConfigureArguments,
+    IReadOnlyList<string> FateTests,
+    string ArchitectureEvidence,
+    string DynamicDependencyEvidence,
+    bool SmokeTestPassed,
+    bool Reproducible,
+    IReadOnlyList<WorkerFile> Files,
+    DateTimeOffset CompletedUtc);
+
+internal sealed record FrozenPackage(
+    string Id,
+    string Version,
+    string FileName,
+    long Size,
+    string Sha256,
+    string Kind);
+
+internal sealed record FrozenReleaseManifest(
+    int SchemaVersion,
+    string PlanSha256,
+    string Version,
+    bool CompleteRuntimeMatrix,
+    IReadOnlyList<FrozenPackage> Packages,
+    DateTimeOffset FrozenUtc);
+
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     WriteIndented = true,
@@ -81,4 +123,8 @@ internal sealed record SourceVerificationResult(
 [JsonSerializable(typeof(ReleasePlan))]
 [JsonSerializable(typeof(PersistedPlan))]
 [JsonSerializable(typeof(SourceVerificationResult))]
+[JsonSerializable(typeof(WorkerManifest))]
+[JsonSerializable(typeof(List<WorkerFile>))]
+[JsonSerializable(typeof(FrozenReleaseManifest))]
+[JsonSerializable(typeof(List<FrozenPackage>))]
 internal sealed partial class ReleaseJsonContext : JsonSerializerContext;

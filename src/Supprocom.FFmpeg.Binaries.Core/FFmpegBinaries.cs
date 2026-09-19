@@ -30,7 +30,7 @@ public static class FFmpegBinaries
     {
         get
         {
-            string path = Path.Combine(Directory, ".rid");
+            string path = Path.Combine(Directory, "runtime-identifier.txt");
             return File.Exists(path) ? File.ReadAllText(path).Trim() : string.Empty;
         }
     }

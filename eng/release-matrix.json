@@ -20,6 +20,7 @@
       "tag": "n9.0.2",
       "status": "approved",
       "releaseDate": "2026-09-18",
+      "sourceDateEpoch": 1789687190,
       "archiveUri": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
       "signatureUri": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz.asc",
       "releaseKeyUri": "https://ffmpeg.org/ffmpeg-devel.asc",

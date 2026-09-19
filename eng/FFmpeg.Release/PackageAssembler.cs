@@ -1,0 +1,641 @@
+using System.IO.Compression;
+using System.Security;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Xml.Linq;
+
+namespace Supprocom.FFmpeg.Release;
+
+internal sealed class PackageAssembler(ProcessRunner processRunner)
+{
+    private static readonly TimeSpan PackTimeout = TimeSpan.FromMinutes(5);
+    private const long MaximumPackageBytes = 250L * 1024 * 1024;
+
+    public async Task<string> AssembleAsync(
+        string repositoryRoot,
+        ReleasePlan plan,
+        string planHash,
+        string planDirectory,
+        FlavorDefinition flavor,
+        SourceVerificationResult source,
+        IReadOnlyList<RuntimeDefinition> runtimes,
+        bool completeRuntimeMatrix,
+        CancellationToken cancellationToken)
+    {
+        if (completeRuntimeMatrix && runtimes.Count != plan.RuntimeIdentifiers.Count)
+        {
+            throw new ReleaseFailureException("IncompletePackageMatrix", "Stable package assembly requires every approved Runtime Identifier.");
+        }
+
+        string packageWork = Path.Combine(planDirectory, "package-work");
+        string candidateDirectory = Path.Combine(packageWork, "candidates");
+        string frozenDirectory = Path.Combine(planDirectory, "frozen");
+        RecreateOwnedDirectory(packageWork, planDirectory);
+        Directory.CreateDirectory(candidateDirectory);
+        Directory.CreateDirectory(frozenDirectory);
+        var frozen = new List<FrozenPackage>();
+
+        string sourceCandidate = await PackSourceAsync(
+            repositoryRoot,
+            plan,
+            planHash,
+            planDirectory,
+            flavor,
+            source,
+            runtimes,
+            packageWork,
+            candidateDirectory,
+            cancellationToken).ConfigureAwait(false);
+        frozen.Add(await InspectAndFreezeAsync(
+            sourceCandidate,
+            flavor.SourcePackageId,
+            plan.PackageVersion,
+            "source",
+            frozenDirectory,
+            cancellationToken).ConfigureAwait(false));
+
+        string coreCandidate = await PackCoreAsync(
+            repositoryRoot,
+            plan,
+            candidateDirectory,
+            cancellationToken).ConfigureAwait(false);
+        frozen.Add(await InspectAndFreezeAsync(
+            coreCandidate,
+            flavor.CorePackageId,
+            plan.PackageVersion,
+            "core",
+            frozenDirectory,
+            cancellationToken).ConfigureAwait(false));
+
+        foreach (RuntimeDefinition runtime in runtimes.OrderBy(item => item.Rid, StringComparer.Ordinal))
+        {
+            (WorkerManifest manifest, string payload) = await ReadAndValidateWorkerAsync(
+                plan,
+                planHash,
+                planDirectory,
+                runtime,
+                cancellationToken).ConfigureAwait(false);
+            string runtimeCandidate = await PackRuntimeAsync(
+                repositoryRoot,
+                plan,
+                flavor,
+                runtime,
+                manifest,
+                payload,
+                packageWork,
+                candidateDirectory,
+                cancellationToken).ConfigureAwait(false);
+            frozen.Add(await InspectAndFreezeAsync(
+                runtimeCandidate,
+                $"{flavor.FacadePackageId}.{runtime.Rid}",
+                plan.PackageVersion,
+                "runtime",
+                frozenDirectory,
+                cancellationToken).ConfigureAwait(false));
+        }
+
+        if (completeRuntimeMatrix)
+        {
+            string facadeCandidate = await PackFacadeAsync(
+                repositoryRoot,
+                plan,
+                flavor,
+                runtimes,
+                packageWork,
+                candidateDirectory,
+                cancellationToken).ConfigureAwait(false);
+            frozen.Add(await InspectAndFreezeAsync(
+                facadeCandidate,
+                flavor.FacadePackageId,
+                plan.PackageVersion,
+                "facade",
+                frozenDirectory,
+                cancellationToken).ConfigureAwait(false));
+        }
+
+        var releaseManifest = new FrozenReleaseManifest(
+            1,
+            planHash,
+            plan.PackageVersion,
+            completeRuntimeMatrix,
+            frozen,
+            DateTimeOffset.UtcNow);
+        string manifestPath = Path.Combine(frozenDirectory, "release-manifest.json");
+        await File.WriteAllBytesAsync(
+            manifestPath,
+            JsonSerializer.SerializeToUtf8Bytes(releaseManifest, ReleaseJsonContext.Default.FrozenReleaseManifest),
+            cancellationToken).ConfigureAwait(false);
+        await File.WriteAllLinesAsync(
+            Path.Combine(frozenDirectory, "SHA256SUMS"),
+            frozen.Select(item => $"{item.Sha256}  {item.FileName}"),
+            Encoding.ASCII,
+            cancellationToken).ConfigureAwait(false);
+        string journalPath = Path.Combine(frozenDirectory, "publication-journal.jsonl");
+        if (!File.Exists(journalPath))
+        {
+            await File.WriteAllTextAsync(
+                journalPath,
+                JsonSerializer.Serialize(new { type = "frozen", planSha256 = planHash, packageCount = frozen.Count }) + "\n",
+                new UTF8Encoding(false),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        RecreateOwnedDirectory(packageWork, planDirectory);
+        Directory.Delete(packageWork);
+        return manifestPath;
+    }
+
+    private async Task<string> PackCoreAsync(
+        string repositoryRoot,
+        ReleasePlan plan,
+        string candidateDirectory,
+        CancellationToken cancellationToken)
+    {
+        string project = Path.Combine(
+            repositoryRoot,
+            "src",
+            "Supprocom.FFmpeg.Binaries.Core",
+            "Supprocom.FFmpeg.Binaries.Core.csproj");
+        CommandResult result = await processRunner.RunAsync(
+            "dotnet",
+            [
+                "pack", project,
+                "--configuration", "Release",
+                "--output", candidateDirectory,
+                $"-p:Version={plan.PackageVersion}",
+                $"-p:RepositoryCommit={plan.ReleaseProgramCommit}",
+                "-p:IncludeSymbols=false",
+                "--nologo"
+            ],
+            repositoryRoot,
+            PackTimeout,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(result, "CorePackageCreationFailed");
+        return RequireSingleCandidate(candidateDirectory, $"Supprocom.FFmpeg.Binaries.Core.{plan.PackageVersion}.nupkg");
+    }
+
+    private async Task<string> PackRuntimeAsync(
+        string repositoryRoot,
+        ReleasePlan plan,
+        FlavorDefinition flavor,
+        RuntimeDefinition runtime,
+        WorkerManifest manifest,
+        string payload,
+        string packageWork,
+        string candidateDirectory,
+        CancellationToken cancellationToken)
+    {
+        string packageId = $"{flavor.FacadePackageId}.{runtime.Rid}";
+        string root = Path.Combine(packageWork, packageId);
+        Directory.CreateDirectory(root);
+        CopyTree(payload, Path.Combine(root, "payload"));
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "payload", "runtime-identifier.txt"),
+            runtime.Rid + "\n",
+            Encoding.ASCII,
+            cancellationToken).ConfigureAwait(false);
+        File.Copy(Path.Combine(repositoryRoot, "packaging", "README.md"), Path.Combine(root, "README.md"));
+        string template = await File.ReadAllTextAsync(
+            Path.Combine(repositoryRoot, "packaging", "runtime", "Supprocom.FFmpeg.Binaries.Runtime.props.in"),
+            cancellationToken).ConfigureAwait(false);
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "runtime.props"),
+            template.Replace("@RID@", runtime.Rid, StringComparison.Ordinal),
+            new UTF8Encoding(false),
+            cancellationToken).ConfigureAwait(false);
+        await File.WriteAllBytesAsync(
+            Path.Combine(root, "worker-manifest.json"),
+            JsonSerializer.SerializeToUtf8Bytes(manifest, ReleaseJsonContext.Default.WorkerManifest),
+            cancellationToken).ConfigureAwait(false);
+        string nuspec = CreateNuspec(
+            packageId,
+            plan,
+            "Native FFmpeg and FFprobe payload for " + runtime.Rid + ".",
+            [(flavor.CorePackageId, plan.PackageVersion)],
+            [
+                ("payload/**/*", $"runtimes/{runtime.Rid}/native/ffmpeg"),
+                ("runtime.props", $"buildTransitive/{packageId}.props"),
+                ("worker-manifest.json", "build-metadata"),
+                ("README.md", string.Empty)
+            ]);
+        return await PackNuspecAsync(root, nuspec, packageId, plan.PackageVersion, candidateDirectory, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<string> PackSourceAsync(
+        string repositoryRoot,
+        ReleasePlan plan,
+        string planHash,
+        string planDirectory,
+        FlavorDefinition flavor,
+        SourceVerificationResult source,
+        IReadOnlyList<RuntimeDefinition> runtimes,
+        string packageWork,
+        string candidateDirectory,
+        CancellationToken cancellationToken)
+    {
+        string root = Path.Combine(packageWork, flavor.SourcePackageId);
+        Directory.CreateDirectory(Path.Combine(root, "source"));
+        Directory.CreateDirectory(Path.Combine(root, "build"));
+        Directory.CreateDirectory(Path.Combine(root, "provenance", "workers"));
+        Directory.CreateDirectory(Path.Combine(root, "patches"));
+        File.Copy(source.ArchivePath, Path.Combine(root, "source", Path.GetFileName(source.ArchivePath)));
+        File.Copy(source.SignaturePath, Path.Combine(root, "source", Path.GetFileName(source.SignaturePath)));
+        File.Copy(source.ReleaseKeyPath, Path.Combine(root, "source", Path.GetFileName(source.ReleaseKeyPath)));
+        CopyTree(Path.Combine(repositoryRoot, "eng", "FFmpeg.Release"), Path.Combine(root, "build", "FFmpeg.Release"));
+        File.Copy(Path.Combine(repositoryRoot, "eng", "release-matrix.json"), Path.Combine(root, "build", "release-matrix.json"));
+        File.Copy(Path.Combine(repositoryRoot, "FFmpeg.Release.csproj"), Path.Combine(root, "build", "FFmpeg.Release.csproj"));
+        File.Copy(Path.Combine(repositoryRoot, "global.json"), Path.Combine(root, "build", "global.json"));
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "patches", "README.txt"),
+            "No FFmpeg source patch is applied by this package version.\n",
+            new UTF8Encoding(false),
+            cancellationToken).ConfigureAwait(false);
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "provenance", "plan-sha256.txt"),
+            planHash + "\n",
+            Encoding.ASCII,
+            cancellationToken).ConfigureAwait(false);
+        foreach (RuntimeDefinition runtime in runtimes)
+        {
+            string manifest = Path.Combine(planDirectory, "workers", runtime.Rid, "accepted", "worker-manifest.json");
+            if (File.Exists(manifest))
+            {
+                File.Copy(manifest, Path.Combine(root, "provenance", "workers", runtime.Rid + ".json"));
+            }
+        }
+
+        File.Copy(Path.Combine(repositoryRoot, "COPYING.LGPLv2.1"), Path.Combine(root, "COPYING.LGPLv2.1"));
+        File.Copy(Path.Combine(repositoryRoot, "COPYING.LGPLv3"), Path.Combine(root, "COPYING.LGPLv3"));
+        File.Copy(Path.Combine(repositoryRoot, "LICENSE.md"), Path.Combine(root, "LICENSE.md"));
+        File.Copy(Path.Combine(repositoryRoot, "packaging", "README.md"), Path.Combine(root, "README.md"));
+        string nuspec = CreateNuspec(
+            flavor.SourcePackageId,
+            plan,
+            "Exact corresponding FFmpeg source, release verification, build definitions, license material, and provenance.",
+            [],
+            [
+                ("source/**/*", "source"),
+                ("build/**/*", "build"),
+                ("provenance/**/*", "provenance"),
+                ("patches/**/*", "patches"),
+                ("COPYING.LGPLv2.1", "licenses"),
+                ("COPYING.LGPLv3", "licenses"),
+                ("LICENSE.md", "licenses"),
+                ("README.md", string.Empty)
+            ]);
+        return await PackNuspecAsync(
+            root,
+            nuspec,
+            flavor.SourcePackageId,
+            plan.PackageVersion,
+            candidateDirectory,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<string> PackFacadeAsync(
+        string repositoryRoot,
+        ReleasePlan plan,
+        FlavorDefinition flavor,
+        IReadOnlyList<RuntimeDefinition> runtimes,
+        string packageWork,
+        string candidateDirectory,
+        CancellationToken cancellationToken)
+    {
+        string root = Path.Combine(packageWork, flavor.FacadePackageId);
+        Directory.CreateDirectory(root);
+        File.Copy(Path.Combine(repositoryRoot, "packaging", "README.md"), Path.Combine(root, "README.md"));
+        var dependencies = new List<(string Id, string Version)> { (flavor.CorePackageId, plan.PackageVersion) };
+        dependencies.AddRange(runtimes.Select(runtime => ($"{flavor.FacadePackageId}.{runtime.Rid}", plan.PackageVersion)));
+        string nuspec = CreateNuspec(
+            flavor.FacadePackageId,
+            plan,
+            "One-reference FFmpeg and FFprobe deployment for supported .NET Runtime Identifiers.",
+            dependencies,
+            [("README.md", string.Empty)]);
+        return await PackNuspecAsync(
+            root,
+            nuspec,
+            flavor.FacadePackageId,
+            plan.PackageVersion,
+            candidateDirectory,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<string> PackNuspecAsync(
+        string root,
+        string nuspec,
+        string packageId,
+        string version,
+        string candidateDirectory,
+        CancellationToken cancellationToken)
+    {
+        string nuspecPath = Path.Combine(root, packageId + ".nuspec");
+        await File.WriteAllTextAsync(nuspecPath, nuspec, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+        string projectPath = Path.Combine(root, "pack.csproj");
+        string project = """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+                <IncludeBuildOutput>false</IncludeBuildOutput>
+                <NuspecFile>$(PackageNuspecFile)</NuspecFile>
+                <NuspecBasePath>$(MSBuildProjectDirectory)</NuspecBasePath>
+              </PropertyGroup>
+            </Project>
+            """;
+        await File.WriteAllTextAsync(projectPath, project, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
+        CommandResult result = await processRunner.RunAsync(
+            "dotnet",
+            [
+                "pack", projectPath,
+                "--configuration", "Release",
+                "--output", candidateDirectory,
+                $"-p:PackageNuspecFile={nuspecPath}",
+                "--nologo"
+            ],
+            root,
+            PackTimeout,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(result, "PackageCreationFailed");
+        return RequireSingleCandidate(candidateDirectory, $"{packageId}.{version}.nupkg");
+    }
+
+    private static string CreateNuspec(
+        string packageId,
+        ReleasePlan plan,
+        string description,
+        List<(string Id, string Version)> dependencies,
+        List<(string Source, string Target)> files)
+    {
+        string dependencyXml = dependencies.Count == 0
+            ? string.Empty
+            : "<dependencies>" + string.Concat(dependencies.Select(dependency =>
+                $"<dependency id=\"{Escape(dependency.Id)}\" version=\"[{Escape(dependency.Version)}]\" />")) + "</dependencies>";
+        string fileXml = string.Concat(files.Select(file =>
+            $"<file src=\"{Escape(file.Source)}\" target=\"{Escape(file.Target)}\" />"));
+        return $"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+              <metadata>
+                <id>{Escape(packageId)}</id>
+                <version>{Escape(plan.PackageVersion)}</version>
+                <authors>Supprocom</authors>
+                <owners>Supprocom</owners>
+                <requireLicenseAcceptance>false</requireLicenseAcceptance>
+                <license type="expression">LGPL-2.1-or-later</license>
+                <readme>README.md</readme>
+                <projectUrl>https://github.com/Supprocom/FFmpeg.Binaries</projectUrl>
+                <repository type="git" url="https://github.com/Supprocom/FFmpeg.Binaries.git" commit="{Escape(plan.ReleaseProgramCommit)}" />
+                <description>{Escape(description)}</description>
+                <tags>ffmpeg ffprobe native binaries multimedia</tags>
+                {dependencyXml}
+              </metadata>
+              <files>{fileXml}</files>
+            </package>
+            """;
+    }
+
+    private async Task<(WorkerManifest Manifest, string Payload)> ReadAndValidateWorkerAsync(
+        ReleasePlan plan,
+        string planHash,
+        string planDirectory,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        string accepted = Path.Combine(planDirectory, "workers", runtime.Rid, "accepted");
+        string manifestPath = Path.Combine(accepted, "worker-manifest.json");
+        string payload = Path.Combine(accepted, "payload");
+        if (!File.Exists(manifestPath) || !Directory.Exists(payload))
+        {
+            throw new ReleaseFailureException("WorkerArtifactMissing", $"The accepted {runtime.Rid} worker artifact is missing.");
+        }
+
+        WorkerManifest manifest = JsonSerializer.Deserialize(
+            await File.ReadAllBytesAsync(manifestPath, cancellationToken).ConfigureAwait(false),
+            ReleaseJsonContext.Default.WorkerManifest)
+            ?? throw new ReleaseFailureException("WorkerManifestInvalid", $"The {runtime.Rid} worker manifest is empty.");
+        if (!manifest.PlanSha256.Equals(planHash, StringComparison.Ordinal) ||
+            !manifest.Version.Equals(plan.Version, StringComparison.Ordinal) ||
+            !manifest.SourceCommit.Equals(plan.SourceCommit, StringComparison.Ordinal) ||
+            !manifest.ArchiveSha256.Equals(plan.ArchiveSha256, StringComparison.Ordinal) ||
+            !manifest.RuntimeIdentifier.Equals(runtime.Rid, StringComparison.Ordinal) ||
+            !manifest.Reproducible ||
+            !manifest.SmokeTestPassed)
+        {
+            throw new ReleaseFailureException("WorkerManifestMismatch", $"The {runtime.Rid} worker manifest does not satisfy the immutable plan.");
+        }
+
+        foreach (WorkerFile expected in manifest.Files)
+        {
+            string path = Path.GetFullPath(Path.Combine(payload, expected.Path.Replace('/', Path.DirectorySeparatorChar)));
+            if (!(path + Path.DirectorySeparatorChar).StartsWith(Path.GetFullPath(payload) + Path.DirectorySeparatorChar, StringComparison.Ordinal) ||
+                !File.Exists(path))
+            {
+                throw new ReleaseFailureException("WorkerPayloadInvalid", $"The {runtime.Rid} worker payload is missing '{expected.Path}'.");
+            }
+
+            var info = new FileInfo(path);
+            string hash = await HashFileAsync(path, cancellationToken).ConfigureAwait(false);
+            if (info.Length != expected.Size || !hash.Equals(expected.Sha256, StringComparison.Ordinal))
+            {
+                throw new ReleaseFailureException("WorkerPayloadHashMismatch", $"The {runtime.Rid} payload file '{expected.Path}' changed after acceptance.");
+            }
+        }
+
+        int actualCount = Directory.EnumerateFiles(payload, "*", SearchOption.AllDirectories).Count();
+        if (actualCount != manifest.Files.Count)
+        {
+            throw new ReleaseFailureException("WorkerPayloadUnexpectedFile", $"The {runtime.Rid} payload contains an unmanifested file.");
+        }
+
+        return (manifest, payload);
+    }
+
+    private static async Task<FrozenPackage> InspectAndFreezeAsync(
+        string candidate,
+        string expectedId,
+        string expectedVersion,
+        string kind,
+        string frozenDirectory,
+        CancellationToken cancellationToken)
+    {
+        ValidatePackageArchive(candidate, expectedId, expectedVersion, kind);
+        var info = new FileInfo(candidate);
+        if (info.Length > MaximumPackageBytes)
+        {
+            throw new ReleaseFailureException("PackageTooLarge", $"Package '{expectedId}' exceeds the 250 MiB release limit.");
+        }
+
+        string hash = await HashFileAsync(candidate, cancellationToken).ConfigureAwait(false);
+        string destination = Path.Combine(frozenDirectory, Path.GetFileName(candidate));
+        if (File.Exists(destination))
+        {
+            string existingHash = await HashFileAsync(destination, cancellationToken).ConfigureAwait(false);
+            if (!existingHash.Equals(hash, StringComparison.Ordinal))
+            {
+                throw new ReleaseFailureException("FrozenArtifactConflict", $"Frozen package identity '{expectedId} {expectedVersion}' already has different bytes.");
+            }
+
+            File.Delete(candidate);
+        }
+        else
+        {
+            File.Move(candidate, destination, overwrite: false);
+        }
+
+        MakeReadOnly(destination);
+        return new FrozenPackage(expectedId, expectedVersion, Path.GetFileName(destination), info.Length, hash, kind);
+    }
+
+    private static void ValidatePackageArchive(string path, string expectedId, string expectedVersion, string kind)
+    {
+        using ZipArchive archive = ZipFile.OpenRead(path);
+        string[] names = archive.Entries.Select(entry => entry.FullName).ToArray();
+        if (names.Length != names.Distinct(StringComparer.OrdinalIgnoreCase).Count())
+        {
+            throw new ReleaseFailureException("DuplicatePackageEntry", $"Package '{expectedId}' contains duplicate archive paths.");
+        }
+
+        if (names.Any(name => name.StartsWith('/') ||
+                              name.Contains("../", StringComparison.Ordinal) ||
+                              name.Contains("SUPPROCOM_NUGET_API_KEY", StringComparison.OrdinalIgnoreCase) ||
+                              name.Contains("GITHUB_PACKAGES_TOKEN", StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new ReleaseFailureException("UnsafePackageEntry", $"Package '{expectedId}' contains an unsafe archive path.");
+        }
+
+        ZipArchiveEntry nuspecEntry = archive.Entries.SingleOrDefault(entry => entry.FullName.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase))
+            ?? throw new ReleaseFailureException("PackageMetadataMissing", $"Package '{expectedId}' has no nuspec metadata.");
+        using Stream nuspecStream = nuspecEntry.Open();
+        XDocument document = XDocument.Load(nuspecStream, LoadOptions.None);
+        XElement metadata = document.Descendants().Single(element => element.Name.LocalName == "metadata");
+        string id = metadata.Elements().Single(element => element.Name.LocalName == "id").Value;
+        string version = metadata.Elements().Single(element => element.Name.LocalName == "version").Value;
+        if (!id.Equals(expectedId, StringComparison.Ordinal) || !version.Equals(expectedVersion, StringComparison.Ordinal))
+        {
+            throw new ReleaseFailureException("PackageIdentityMismatch", $"Package '{expectedId}' metadata has an unexpected identity.");
+        }
+
+        XElement? repository = metadata.Elements().SingleOrDefault(element => element.Name.LocalName == "repository");
+        XElement? license = metadata.Elements().SingleOrDefault(element => element.Name.LocalName == "license");
+        if (repository?.Attribute("url")?.Value != "https://github.com/Supprocom/FFmpeg.Binaries.git" ||
+            license?.Value != "LGPL-2.1-or-later" ||
+            !names.Contains("README.md", StringComparer.Ordinal))
+        {
+            throw new ReleaseFailureException("PackageMetadataInvalid", $"Package '{expectedId}' lacks approved repository, license, or README metadata.");
+        }
+
+        foreach (XElement dependency in metadata.Descendants().Where(element => element.Name.LocalName == "dependency"))
+        {
+            if (dependency.Attribute("version")?.Value != $"[{expectedVersion}]")
+            {
+                throw new ReleaseFailureException("PackageDependencyNotExact", $"Package '{expectedId}' has a non-exact family dependency.");
+            }
+        }
+
+        if (kind == "runtime")
+        {
+            const string runtimePackagePrefix = "Supprocom.FFmpeg.Binaries.";
+            if (!expectedId.StartsWith(runtimePackagePrefix, StringComparison.Ordinal))
+            {
+                throw new ReleaseFailureException("RuntimePackageIdentityInvalid", $"Runtime package '{expectedId}' has an unexpected identity prefix.");
+            }
+
+            string rid = expectedId[runtimePackagePrefix.Length..];
+            string prefix = $"runtimes/{rid}/native/ffmpeg/";
+            if (!names.Any(name => name.StartsWith(prefix, StringComparison.Ordinal)) ||
+                !names.Any(name => name.StartsWith("buildTransitive/", StringComparison.Ordinal)))
+            {
+                throw new ReleaseFailureException("RuntimePackageLayoutInvalid", $"Runtime package '{expectedId}' lacks its native or transitive-build assets.");
+            }
+        }
+    }
+
+    private static string RequireSingleCandidate(string directory, string fileName)
+    {
+        string path = Path.Combine(directory, fileName);
+        if (!File.Exists(path))
+        {
+            throw new ReleaseFailureException("PackageCandidateMissing", $"Expected package candidate '{fileName}' was not created.");
+        }
+
+        return path;
+    }
+
+    private static void MakeReadOnly(string path)
+    {
+        File.SetAttributes(path, File.GetAttributes(path) | FileAttributes.ReadOnly);
+        if (!OperatingSystem.IsWindows())
+        {
+            UnixFileMode mode = File.GetUnixFileMode(path);
+            File.SetUnixFileMode(path, mode & ~(UnixFileMode.UserWrite | UnixFileMode.GroupWrite | UnixFileMode.OtherWrite));
+        }
+    }
+
+    private static string Escape(string value) => SecurityElement.Escape(value) ?? string.Empty;
+
+    private static void CopyTree(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (string directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
+        }
+
+        foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            string target = Path.Combine(destination, Path.GetRelativePath(source, file));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(file, target, overwrite: false);
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(target, File.GetUnixFileMode(file));
+            }
+        }
+    }
+
+    private static void RecreateOwnedDirectory(string path, string ownerRoot)
+    {
+        string fullPath = Path.GetFullPath(path);
+        string fullOwner = Path.GetFullPath(ownerRoot) + Path.DirectorySeparatorChar;
+        if (!(fullPath + Path.DirectorySeparatorChar).StartsWith(fullOwner, StringComparison.Ordinal))
+        {
+            throw new ReleaseFailureException("UnsafePackagePath", "A package-work directory escaped its plan-owned root.");
+        }
+
+        if (Directory.Exists(fullPath))
+        {
+            Directory.Delete(fullPath, recursive: true);
+        }
+
+        Directory.CreateDirectory(fullPath);
+    }
+
+    private static async Task<string> HashFileAsync(string path, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            131072,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        byte[] hash = await SHA256.HashDataAsync(stream, cancellationToken).ConfigureAwait(false);
+        return Convert.ToHexStringLower(hash);
+    }
+
+    private static void EnsureSuccess(CommandResult result, string code)
+    {
+        if (result.ExitCode != 0)
+        {
+            string diagnostic = string.Join(
+                '\n',
+                (result.StandardError + "\n" + result.StandardOutput)
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .TakeLast(20));
+            throw new ReleaseFailureException(code, $"NuGet package creation failed.\n{diagnostic}");
+        }
+    }
+}

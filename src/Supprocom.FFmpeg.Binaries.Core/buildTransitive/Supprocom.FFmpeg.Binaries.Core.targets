@@ -1,7 +1,24 @@
 <Project>
+  <Target Name="SupprocomFFmpegSuppressDefaultNativeCopy"
+          BeforeTargets="ResolveLockFileCopyLocalFiles;GenerateBuildDependencyFile;GeneratePublishDependencyFile"
+          DependsOnTargets="ResolvePackageAssets">
+    <ItemGroup>
+      <NativeCopyLocalItems Remove="@(NativeCopyLocalItems)"
+                            Condition="$([System.String]::Copy('%(NativeCopyLocalItems.NuGetPackageId)').StartsWith('Supprocom.FFmpeg.Binaries.'))" />
+    </ItemGroup>
+  </Target>
+
   <Target Name="SupprocomFFmpegSelectPayload"
           BeforeTargets="SupprocomFFmpegValidateSelection"
           Condition="'$(SupprocomFFmpegCopyToOutput)' == 'true'">
+    <PropertyGroup>
+      <SupprocomFFmpegRuntimeIdentifier Condition="'$(SupprocomFFmpegRuntimeIdentifier)' == '' and '$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</SupprocomFFmpegRuntimeIdentifier>
+      <SupprocomFFmpegRuntimeIdentifier Condition="'$(SupprocomFFmpegRuntimeIdentifier)' == '' and '$(NETCoreSdkRuntimeIdentifier)' != ''">$(NETCoreSdkRuntimeIdentifier)</SupprocomFFmpegRuntimeIdentifier>
+      <SupprocomFFmpegDirectory>$(TargetDir)$(SupprocomFFmpegOutputDirectory)</SupprocomFFmpegDirectory>
+      <SupprocomFFmpegExecutableSuffix Condition="'$(SupprocomFFmpegRuntimeIdentifier)' == 'win-x86' or '$(SupprocomFFmpegRuntimeIdentifier)' == 'win-x64' or '$(SupprocomFFmpegRuntimeIdentifier)' == 'win-arm64'">.exe</SupprocomFFmpegExecutableSuffix>
+      <SupprocomFFmpegPath>$(SupprocomFFmpegDirectory)/ffmpeg$(SupprocomFFmpegExecutableSuffix)</SupprocomFFmpegPath>
+      <SupprocomFFprobePath>$(SupprocomFFmpegDirectory)/ffprobe$(SupprocomFFmpegExecutableSuffix)</SupprocomFFprobePath>
+    </PropertyGroup>
     <ItemGroup>
       <SupprocomFFmpegPayload Include="@(SupprocomFFmpegAvailablePayload)"
                               Condition="'%(SupprocomFFmpegAvailablePayload.RuntimeIdentifier)' == '$(SupprocomFFmpegRuntimeIdentifier)'" />

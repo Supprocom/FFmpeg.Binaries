@@ -89,6 +89,13 @@ internal static class MatrixLoader
                     $"Approved FFmpeg version '{version.Version}' lacks immutable source evidence.");
             }
 
+            if (version.SourceDateEpoch is null or <= 0)
+            {
+                throw new ReleaseFailureException(
+                    "IncompleteApprovedVersion",
+                    $"Approved FFmpeg version '{version.Version}' lacks a valid source epoch.");
+            }
+
             ValidateHex(version.ReleaseKeyFingerprint!, 40, "release key fingerprint");
             ValidateHex(version.ArchiveSha256!, 64, "archive SHA-256");
             ValidateHex(version.TagObject!, 40, "tag object");

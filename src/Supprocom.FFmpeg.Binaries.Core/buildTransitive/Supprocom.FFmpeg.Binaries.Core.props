@@ -2,12 +2,5 @@
   <PropertyGroup>
     <SupprocomFFmpegCopyToOutput Condition="'$(SupprocomFFmpegCopyToOutput)' == ''">true</SupprocomFFmpegCopyToOutput>
     <SupprocomFFmpegOutputDirectory Condition="'$(SupprocomFFmpegOutputDirectory)' == ''">ffmpeg</SupprocomFFmpegOutputDirectory>
-    <SupprocomFFmpegRuntimeIdentifier Condition="'$(SupprocomFFmpegRuntimeIdentifier)' == '' and '$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</SupprocomFFmpegRuntimeIdentifier>
-    <SupprocomFFmpegRuntimeIdentifier Condition="'$(SupprocomFFmpegRuntimeIdentifier)' == '' and '$(NETCoreSdkRuntimeIdentifier)' != ''">$(NETCoreSdkRuntimeIdentifier)</SupprocomFFmpegRuntimeIdentifier>
-    <SupprocomFFmpegDirectory>$(TargetDir)$(SupprocomFFmpegOutputDirectory)</SupprocomFFmpegDirectory>
-    <SupprocomFFmpegPath Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(SupprocomFFmpegDirectory)\ffmpeg.exe</SupprocomFFmpegPath>
-    <SupprocomFFmpegPath Condition="!$([MSBuild]::IsOSPlatform('Windows'))">$(SupprocomFFmpegDirectory)/ffmpeg</SupprocomFFmpegPath>
-    <SupprocomFFprobePath Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(SupprocomFFmpegDirectory)\ffprobe.exe</SupprocomFFprobePath>
-    <SupprocomFFprobePath Condition="!$([MSBuild]::IsOSPlatform('Windows'))">$(SupprocomFFmpegDirectory)/ffprobe</SupprocomFFprobePath>
   </PropertyGroup>
 </Project>

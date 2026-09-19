@@ -18,6 +18,22 @@ internal static class Program
 
             string matrixPath = Path.Combine(repositoryRoot, "eng", "release-matrix.json");
             (ReleaseMatrix matrix, string matrixHash) = MatrixLoader.Load(matrixPath);
+            if (options.EmitWorkerMatrix)
+            {
+                await Console.Out.WriteLineAsync(JsonSerializer.Serialize(
+                    new
+                    {
+                        include = matrix.RuntimeIdentifiers.Select(runtime => new
+                        {
+                            runtimeIdentifier = runtime.Rid,
+                            os = runtime.Os,
+                            architecture = runtime.Architecture,
+                            runner = runtime.Worker
+                        })
+                    })).ConfigureAwait(false);
+                return 0;
+            }
+
             VersionDefinition version = SelectVersion(matrix, options.Version);
             FlavorDefinition flavor = matrix.Flavors.Single(item => item.Name.Equals("lgpl", StringComparison.Ordinal));
             var runner = new ProcessRunner();
@@ -38,6 +54,70 @@ internal static class Program
                 matrix.Repository.OfficialSource,
                 planDirectory,
                 CancellationToken.None).ConfigureAwait(false);
+            if (options.Worker)
+            {
+                if (string.IsNullOrWhiteSpace(options.RuntimeIdentifier))
+                {
+                    throw new ReleaseFailureException("RuntimeIdentifierRequired", "Worker mode requires --rid <Runtime Identifier>.");
+                }
+
+                RuntimeDefinition runtime = matrix.RuntimeIdentifiers.SingleOrDefault(
+                    item => item.Rid.Equals(options.RuntimeIdentifier, StringComparison.Ordinal))
+                    ?? throw new ReleaseFailureException(
+                        "UnsupportedRuntimeIdentifier",
+                        $"Runtime Identifier '{options.RuntimeIdentifier}' is not in the approved matrix.");
+                string manifestPath = await new NativeWorker(runner).BuildAsync(
+                    repositoryRoot,
+                    plan,
+                    planHash,
+                    planDirectory,
+                    version,
+                    flavor,
+                    runtime,
+                    source,
+                    CancellationToken.None).ConfigureAwait(false);
+                Console.WriteLine($"Accepted worker manifest: {manifestPath}");
+                return 0;
+            }
+
+            if (options.Assemble)
+            {
+                IReadOnlyList<RuntimeDefinition> packageRuntimes;
+                if (options.AllowPartial)
+                {
+                    if (string.IsNullOrWhiteSpace(options.RuntimeIdentifier))
+                    {
+                        throw new ReleaseFailureException("RuntimeIdentifierRequired", "Partial package assembly requires --rid <Runtime Identifier>.");
+                    }
+
+                    packageRuntimes =
+                    [
+                        matrix.RuntimeIdentifiers.SingleOrDefault(
+                            item => item.Rid.Equals(options.RuntimeIdentifier, StringComparison.Ordinal))
+                        ?? throw new ReleaseFailureException(
+                            "UnsupportedRuntimeIdentifier",
+                            $"Runtime Identifier '{options.RuntimeIdentifier}' is not in the approved matrix.")
+                    ];
+                }
+                else
+                {
+                    packageRuntimes = matrix.RuntimeIdentifiers;
+                }
+
+                string manifestPath = await new PackageAssembler(runner).AssembleAsync(
+                    repositoryRoot,
+                    plan,
+                    planHash,
+                    planDirectory,
+                    flavor,
+                    source,
+                    packageRuntimes,
+                    completeRuntimeMatrix: !options.AllowPartial,
+                    CancellationToken.None).ConfigureAwait(false);
+                Console.WriteLine($"Frozen release manifest: {manifestPath}");
+                return 0;
+            }
+
             CredentialAvailability credentials = CredentialProbe.InspectPresence();
 
             Console.WriteLine($"Plan: {planHash}");
@@ -141,12 +221,26 @@ internal static class Program
         throw new ReleaseFailureException("RepositoryRootNotFound", "Run the release program from the repository root.");
     }
 
-    private sealed record Options(bool SelfTest, bool AllowDirty, string? Version, string? ReleaseRoot)
+    private sealed record Options(
+        bool SelfTest,
+        bool AllowDirty,
+        bool EmitWorkerMatrix,
+        bool Worker,
+        bool Assemble,
+        bool AllowPartial,
+        string? RuntimeIdentifier,
+        string? Version,
+        string? ReleaseRoot)
     {
         public static Options Parse(string[] args)
         {
             bool selfTest = false;
             bool allowDirty = false;
+            bool emitWorkerMatrix = false;
+            bool worker = false;
+            bool assemble = false;
+            bool allowPartial = false;
+            string? runtimeIdentifier = null;
             string? version = null;
             string? releaseRoot = null;
             for (int index = 0; index < args.Length; index++)
@@ -159,6 +253,21 @@ internal static class Program
                     case "--allow-dirty":
                         allowDirty = true;
                         break;
+                    case "--emit-worker-matrix":
+                        emitWorkerMatrix = true;
+                        break;
+                    case "--worker":
+                        worker = true;
+                        break;
+                    case "--assemble":
+                        assemble = true;
+                        break;
+                    case "--allow-partial":
+                        allowPartial = true;
+                        break;
+                    case "--rid" when index + 1 < args.Length:
+                        runtimeIdentifier = args[++index];
+                        break;
                     case "--version" when index + 1 < args.Length:
                         version = args[++index];
                         break;
@@ -170,7 +279,16 @@ internal static class Program
                 }
             }
 
-            return new Options(selfTest, allowDirty, version, releaseRoot);
+            return new Options(
+                selfTest,
+                allowDirty,
+                emitWorkerMatrix,
+                worker,
+                assemble,
+                allowPartial,
+                runtimeIdentifier,
+                version,
+                releaseRoot);
         }
     }
 }
