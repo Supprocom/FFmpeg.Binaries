@@ -1,2 +1,3 @@
 *.pnm -diff -text
 Changelog    merge=union
+/eng/release-matrix.json text eol=lf

@@ -13,6 +13,10 @@ internal static class SelfTests
         (ReleaseMatrix matrix, string matrixHash) = MatrixLoader.Load(matrixPath);
         Require(matrix.RuntimeIdentifiers.Count == 9, "runtime matrix cardinality");
         Require(matrixHash.Length == 64, "matrix hash length");
+        Require(
+            MatrixLoader.ComputeCanonicalSha256("{\n  \"value\": 1\n}\n"u8) ==
+            MatrixLoader.ComputeCanonicalSha256("{\r\n  \"value\": 1\r\n}\r\n"u8),
+            "platform-independent matrix hash");
         VersionDefinition version = matrix.Versions.Single(item => item.Status == "approved");
         FlavorDefinition flavor = matrix.Flavors.Single();
         ReleasePlan first = Program.CreatePlan(matrix, matrixHash, version, flavor, new string('a', 40), reducedValidation: false);
@@ -44,7 +48,7 @@ internal static class SelfTests
         Require(
             windowsDependencies == "DLL Name: avcodec-63.dll\nDLL Name: KERNEL32.dll",
             "canonical Windows dependency evidence");
-        Console.WriteLine("Self-tests passed: 12/12");
+        Console.WriteLine("Self-tests passed: 13/13");
     }
 
     private static void Require(bool condition, string label)

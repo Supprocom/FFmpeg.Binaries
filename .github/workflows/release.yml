@@ -405,6 +405,7 @@ jobs:
             "${SDK_IMAGE}" \
             sh -euxc '
               apk add --no-cache git
+              git config --global --add safe.directory /workspace
               dotnet run --project FFmpeg.Release.csproj --configuration Release -- \
                 --consumer-gate --version "${RELEASE_VERSION}" --rid "${RELEASE_RID}" \
                 --package-root /runner-temp/packages \

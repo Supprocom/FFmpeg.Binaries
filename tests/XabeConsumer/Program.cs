@@ -9,7 +9,12 @@ if (!FFmpegBinaries.RuntimeIdentifier.Equals(expectedRuntimeIdentifier, StringCo
     throw new InvalidOperationException($"Unexpected payload Runtime Identifier '{FFmpegBinaries.RuntimeIdentifier}'.");
 }
 
-Xabe.FFmpeg.FFmpeg.SetExecutablesPath(FFmpegBinaries.Directory);
+string? path = Environment.GetEnvironmentVariable("PATH");
+Environment.SetEnvironmentVariable(
+    "PATH",
+    string.IsNullOrEmpty(path)
+        ? FFmpegBinaries.Directory
+        : FFmpegBinaries.Directory + Path.PathSeparator + path);
 string input = Path.Combine(Path.GetTempPath(), $"supprocom-xabe-{Guid.NewGuid():N}.mkv");
 try
 {

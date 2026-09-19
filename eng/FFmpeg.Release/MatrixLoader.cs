@@ -24,7 +24,31 @@ internal static class MatrixLoader
         ReleaseMatrix matrix = JsonSerializer.Deserialize(bytes, ReleaseJsonContext.Default.ReleaseMatrix)
             ?? throw new ReleaseFailureException("InvalidReleaseMatrix", "The release matrix is empty.");
         Validate(matrix);
-        return (matrix, Convert.ToHexStringLower(SHA256.HashData(bytes)));
+        return (matrix, ComputeCanonicalSha256(bytes));
+    }
+
+    internal static string ComputeCanonicalSha256(ReadOnlySpan<byte> bytes)
+    {
+        byte[] canonical = new byte[bytes.Length];
+        int destination = 0;
+        for (int source = 0; source < bytes.Length; source++)
+        {
+            byte value = bytes[source];
+            if (value == '\r')
+            {
+                canonical[destination++] = (byte)'\n';
+                if (source + 1 < bytes.Length && bytes[source + 1] == '\n')
+                {
+                    source++;
+                }
+
+                continue;
+            }
+
+            canonical[destination++] = value;
+        }
+
+        return Convert.ToHexStringLower(SHA256.HashData(canonical.AsSpan(0, destination)));
     }
 
     internal static void Validate(ReleaseMatrix matrix)
