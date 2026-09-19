@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Xml;
 
 namespace Supprocom.FFmpeg.Release;
 
@@ -37,13 +38,15 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
         var scenarios = new List<string>();
         string cache = Path.Combine(root, "nuget-cache");
         Directory.CreateDirectory(cache);
+        string nugetConfig = WriteNuGetConfig(root, packages);
         var environment = new Dictionary<string, string?>
         {
             ["NUGET_PACKAGES"] = cache,
             ["NUGET_XMLDOC_MODE"] = "skip",
             ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
             ["DOTNET_NOLOGO"] = "1",
-            ["SUPPROCOM_TEST_RID"] = runtime.Rid
+            ["SUPPROCOM_TEST_RID"] = runtime.Rid,
+            ["SUPPROCOM_NUGET_CONFIG"] = nugetConfig
         };
 
         string runtimePackage = $"Supprocom.FFmpeg.Binaries.{runtime.Rid}";
@@ -204,8 +207,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 "restore", project,
                 "--runtime", runtime.Rid,
                 "--packages", environment["NUGET_PACKAGES"]!,
-                "--source", packages,
-                "--source", NuGetOrg,
+                "--configfile", environment["SUPPROCOM_NUGET_CONFIG"]!,
                 .. properties,
                 "--nologo"
             ],
@@ -279,8 +281,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             [
                 "restore", project,
                 "--packages", environment["NUGET_PACKAGES"]!,
-                "--source", packages,
-                "--source", NuGetOrg,
+                "--configfile", environment["SUPPROCOM_NUGET_CONFIG"]!,
                 .. properties,
                 "--nologo"
             ],
@@ -328,8 +329,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             [
                 "restore", project,
                 "--packages", environment["NUGET_PACKAGES"]!,
-                "--source", packages,
-                "--source", NuGetOrg,
+                "--configfile", environment["SUPPROCOM_NUGET_CONFIG"]!,
                 .. properties,
                 "--nologo"
             ],
@@ -437,6 +437,38 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
 
         Directory.CreateDirectory(root);
         return root;
+    }
+
+    private static string WriteNuGetConfig(string root, string packages)
+    {
+        string path = Path.Combine(root, "NuGet.Config");
+        var settings = new XmlWriterSettings
+        {
+            Indent = true,
+            NewLineChars = "\n"
+        };
+        using (XmlWriter writer = XmlWriter.Create(path, settings))
+        {
+            writer.WriteStartDocument();
+            writer.WriteStartElement("configuration");
+            writer.WriteStartElement("packageSources");
+            writer.WriteStartElement("clear");
+            writer.WriteEndElement();
+            writer.WriteStartElement("add");
+            writer.WriteAttributeString("key", "frozen-packages");
+            writer.WriteAttributeString("value", packages);
+            writer.WriteEndElement();
+            writer.WriteStartElement("add");
+            writer.WriteAttributeString("key", "nuget.org");
+            writer.WriteAttributeString("value", NuGetOrg);
+            writer.WriteAttributeString("protocolVersion", "3");
+            writer.WriteEndElement();
+            writer.WriteEndElement();
+            writer.WriteEndElement();
+            writer.WriteEndDocument();
+        }
+
+        return path;
     }
 
     private static void WriteAttestation(
