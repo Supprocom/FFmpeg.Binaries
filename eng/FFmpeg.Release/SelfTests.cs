@@ -48,7 +48,12 @@ internal static class SelfTests
         Require(
             windowsDependencies == "DLL Name: avcodec-63.dll\nDLL Name: KERNEL32.dll",
             "canonical Windows dependency evidence");
-        Console.WriteLine("Self-tests passed: 13/13");
+        Require(
+            NativeWorker.IsBundledWindowsToolchainRuntime("libgcc_s_dw2-1.dll") &&
+            NativeWorker.IsBundledWindowsToolchainRuntime("LIBWINPTHREAD-1.DLL") &&
+            !NativeWorker.IsBundledWindowsToolchainRuntime("KERNEL32.dll"),
+            "Windows toolchain runtime classification");
+        Console.WriteLine("Self-tests passed: 14/14");
     }
 
     private static void Require(bool condition, string label)

@@ -207,6 +207,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             runtime,
             version.SourceDateEpoch.Value,
             cancellationToken).ConfigureAwait(false);
+        await BundleWindowsToolchainRuntimeAsync(installedBin, runtime, cancellationToken).ConfigureAwait(false);
         string payloadRoot = Path.Combine(resultRoot, "payload");
         CopyTree(installedBin, payloadRoot);
         AddComplianceFiles(repositoryRoot, sourceRoot, payloadRoot, version, flavor, runtime, configureArguments);
@@ -403,6 +404,149 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         }
     }
 
+    private async Task BundleWindowsToolchainRuntimeAsync(
+        string payloadRoot,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        if (runtime.Os != "windows")
+        {
+            return;
+        }
+
+        var pending = new Queue<string>(
+            EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.OrdinalIgnoreCase));
+        var inspected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        while (pending.TryDequeue(out string? path))
+        {
+            if (!inspected.Add(path))
+            {
+                continue;
+            }
+
+            foreach (string dependency in await InspectWindowsDependenciesAsync(
+                         path,
+                         payloadRoot,
+                         cancellationToken).ConfigureAwait(false))
+            {
+                if (!IsBundledWindowsToolchainRuntime(dependency))
+                {
+                    continue;
+                }
+
+                if (!Path.GetFileName(dependency).Equals(dependency, StringComparison.Ordinal))
+                {
+                    throw new ReleaseFailureException(
+                        "WindowsRuntimeDependencyInvalid",
+                        $"The imported Windows runtime dependency '{dependency}' is not a file name.");
+                }
+
+                string destination = Path.Combine(payloadRoot, dependency);
+                if (File.Exists(destination))
+                {
+                    continue;
+                }
+
+                string source = await ResolveWindowsRuntimeLibraryAsync(
+                    dependency,
+                    payloadRoot,
+                    cancellationToken).ConfigureAwait(false);
+                File.Copy(source, destination, overwrite: false);
+                CopyWindowsRuntimeLicenses(source, dependency, payloadRoot);
+                pending.Enqueue(destination);
+            }
+        }
+    }
+
+    internal static bool IsBundledWindowsToolchainRuntime(string fileName) =>
+        (fileName.StartsWith("libgcc_s_", StringComparison.OrdinalIgnoreCase) &&
+         fileName.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)) ||
+        fileName.Equals("libwinpthread-1.dll", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<string> ResolveWindowsRuntimeLibraryAsync(
+        string fileName,
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        string? mingwPrefix = Environment.GetEnvironmentVariable("MINGW_PREFIX");
+        if (!string.IsNullOrWhiteSpace(mingwPrefix))
+        {
+            CommandResult converted = await processRunner.RunAsync(
+                "cygpath",
+                ["-w", $"{mingwPrefix.TrimEnd('/')}/bin/{fileName}"],
+                workingDirectory,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(converted, "WindowsRuntimeDependencyMissing");
+            string resolved = converted.StandardOutput.Trim();
+            if (File.Exists(resolved))
+            {
+                return resolved;
+            }
+
+            throw new ReleaseFailureException(
+                "WindowsRuntimeDependencyMissing",
+                $"The required Windows toolchain runtime '{fileName}' is missing from the active MSYS2 environment.");
+        }
+
+        CommandResult result = await processRunner.RunAsync(
+            "where.exe",
+            [fileName],
+            workingDirectory,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(result, "WindowsRuntimeDependencyMissing");
+        string? path = result.StandardOutput
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault(File.Exists);
+        return path ?? throw new ReleaseFailureException(
+            "WindowsRuntimeDependencyMissing",
+            $"The required Windows toolchain runtime '{fileName}' was not found on the worker PATH.");
+    }
+
+    private static void CopyWindowsRuntimeLicenses(string runtimePath, string fileName, string payloadRoot)
+    {
+        string binDirectory = Path.GetDirectoryName(runtimePath)!;
+        string prefix = Directory.GetParent(binDirectory)?.FullName
+            ?? throw new ReleaseFailureException(
+                "WindowsRuntimeLicenseMissing",
+                $"The installation prefix for '{fileName}' could not be resolved.");
+        (string sourceName, string destinationName) = fileName.StartsWith(
+            "libgcc_s_",
+            StringComparison.OrdinalIgnoreCase)
+            ? ("gcc-libs", "GCC-RUNTIME")
+            : ("libwinpthread", "WINPTHREAD");
+        string source = Path.Combine(prefix, "share", "licenses", sourceName);
+        if (!Directory.Exists(source))
+        {
+            throw new ReleaseFailureException(
+                "WindowsRuntimeLicenseMissing",
+                $"The license directory for '{fileName}' is missing.");
+        }
+
+        string destination = Path.Combine(payloadRoot, "licenses", destinationName);
+        if (Directory.Exists(destination))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(destination);
+        string[] licenseFiles = Directory.EnumerateFiles(source, "*", SearchOption.TopDirectoryOnly)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        if (licenseFiles.Length == 0)
+        {
+            throw new ReleaseFailureException(
+                "WindowsRuntimeLicenseMissing",
+                $"The license directory for '{fileName}' is empty.");
+        }
+
+        foreach (string licenseFile in licenseFiles)
+        {
+            File.Copy(licenseFile, Path.Combine(destination, Path.GetFileName(licenseFile)), overwrite: false);
+        }
+    }
+
     private static void NormalizeLinks(string directory)
     {
         foreach (string path in Directory.EnumerateFileSystemEntries(directory, "*", SearchOption.TopDirectoryOnly))
@@ -519,7 +663,8 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         File.WriteAllText(
             Path.Combine(notices, "THIRD-PARTY-NOTICES.txt"),
             "This initial hermetic build uses FFmpeg's in-tree components and no optional external codec library.\n" +
-            "Operating-system libraries listed in BUILD-METADATA/dynamic-dependencies.txt remain host components.\n",
+            "Windows toolchain runtime DLLs, when present, are accompanied by their license texts.\n" +
+            "Operating-system DLLs in BUILD-METADATA/dynamic-dependencies.txt remain host components.\n",
             new UTF8Encoding(false));
         string metadata = Path.Combine(payloadRoot, "BUILD-METADATA");
         Directory.CreateDirectory(metadata);
@@ -657,12 +802,33 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         RuntimeDefinition runtime,
         CancellationToken cancellationToken)
     {
+        if (runtime.Os == "windows")
+        {
+            var dependencies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.OrdinalIgnoreCase))
+            {
+                dependencies.UnionWith(await InspectWindowsDependenciesAsync(
+                    path,
+                    payloadRoot,
+                    cancellationToken).ConfigureAwait(false));
+            }
+
+            string windowsEvidence = string.Join(
+                '\n',
+                dependencies.Order(StringComparer.OrdinalIgnoreCase).Select(name => $"DLL Name: {name}"));
+            await File.WriteAllTextAsync(
+                Path.Combine(payloadRoot, "BUILD-METADATA", "dynamic-dependencies.txt"),
+                windowsEvidence + "\n",
+                new UTF8Encoding(false),
+                cancellationToken).ConfigureAwait(false);
+            return windowsEvidence;
+        }
+
         string executable = Path.Combine(payloadRoot, runtime.Os == "windows" ? "ffmpeg.exe" : "ffmpeg");
         (string tool, string[] arguments) = runtime.Os switch
         {
             "linux" or "linux-musl" => ("ldd", new[] { executable }),
             "macos" => ("otool", new[] { "-L", executable }),
-            "windows" => ("objdump", new[] { "-p", executable }),
             _ => throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is unsupported.")
         };
         CommandResult result = await processRunner.RunAsync(
@@ -672,11 +838,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             TimeSpan.FromSeconds(60),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         EnsureSuccess(result, "DynamicDependencyInspectionFailed");
-        string evidence = runtime.Os == "windows"
-            ? CanonicalizeWindowsDependencyEvidence(result.StandardOutput + result.StandardError)
-            : CanonicalizeDependencyEvidence(
-                (result.StandardOutput + result.StandardError).Trim(),
-                payloadRoot);
+        string evidence = CanonicalizeDependencyEvidence(
+            (result.StandardOutput + result.StandardError).Trim(),
+            payloadRoot);
         await File.WriteAllTextAsync(
             Path.Combine(payloadRoot, "BUILD-METADATA", "dynamic-dependencies.txt"),
             evidence + "\n",
@@ -695,14 +859,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
     internal static string CanonicalizeWindowsDependencyEvidence(string evidence)
     {
-        string[] dependencies = evidence
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(line => line.StartsWith("DLL Name:", StringComparison.OrdinalIgnoreCase))
-            .Select(line => line["DLL Name:".Length..].Trim())
-            .Where(name => name.Length != 0)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Order(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        string[] dependencies = ParseWindowsDependencies(evidence);
         if (dependencies.Length == 0)
         {
             throw new ReleaseFailureException(
@@ -712,6 +869,39 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
         return string.Join('\n', dependencies.Select(name => $"DLL Name: {name}"));
     }
+
+    private async Task<IReadOnlyList<string>> InspectWindowsDependenciesAsync(
+        string path,
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        CommandResult result = await processRunner.RunAsync(
+            "objdump",
+            ["-p", path],
+            workingDirectory,
+            TimeSpan.FromSeconds(60),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(result, "DynamicDependencyInspectionFailed");
+        string[] dependencies = ParseWindowsDependencies(result.StandardOutput + result.StandardError);
+        if (dependencies.Length == 0)
+        {
+            throw new ReleaseFailureException(
+                "DynamicDependencyInspectionInvalid",
+                $"The Windows dependency inspection reported no imported DLLs for '{Path.GetFileName(path)}'.");
+        }
+
+        return dependencies;
+    }
+
+    private static string[] ParseWindowsDependencies(string evidence) =>
+        evidence
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(line => line.StartsWith("DLL Name:", StringComparison.OrdinalIgnoreCase))
+            .Select(line => line["DLL Name:".Length..].Trim())
+            .Where(name => name.Length != 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
     private async Task RunSmokeTestAsync(
         string payloadRoot,
@@ -730,6 +920,10 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         else if (runtime.Os == "macos")
         {
             environment["DYLD_LIBRARY_PATH"] = payloadRoot;
+        }
+        else if (runtime.Os == "windows")
+        {
+            environment["PATH"] = string.Empty;
         }
 
         CommandResult generate = await processRunner.RunAsync(

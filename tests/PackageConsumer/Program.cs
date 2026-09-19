@@ -32,9 +32,16 @@ static string Run(string executable, string argument)
         ?? throw new InvalidOperationException($"Unable to start '{executable}'.");
     string output = process.StandardOutput.ReadToEnd();
     string error = process.StandardError.ReadToEnd();
-    if (!process.WaitForExit(30_000) || process.ExitCode != 0)
+    if (!process.WaitForExit(30_000))
     {
-        throw new InvalidOperationException($"'{executable}' failed: {error}");
+        process.Kill(entireProcessTree: true);
+        throw new InvalidOperationException($"'{executable}' timed out: {error}");
+    }
+
+    if (process.ExitCode != 0)
+    {
+        throw new InvalidOperationException(
+            $"'{executable}' exited with code 0x{unchecked((uint)process.ExitCode):X8}: {error}");
     }
 
     return output;
