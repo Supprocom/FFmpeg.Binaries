@@ -39,10 +39,14 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
             File.SetUnixFileMode(gpgHome, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
         }
 
-        var gpgEnvironment = new Dictionary<string, string?> { ["GNUPGHOME"] = gpgHome };
+        string toolGpgHome = await ToToolPathAsync(gpgHome, planDirectory, cancellationToken).ConfigureAwait(false);
+        string toolKeyPath = await ToToolPathAsync(keyPath, planDirectory, cancellationToken).ConfigureAwait(false);
+        string toolSignaturePath = await ToToolPathAsync(signaturePath, planDirectory, cancellationToken).ConfigureAwait(false);
+        string toolArchivePath = await ToToolPathAsync(archivePath, planDirectory, cancellationToken).ConfigureAwait(false);
+        var gpgEnvironment = new Dictionary<string, string?> { ["GNUPGHOME"] = toolGpgHome };
         CommandResult inspectKey = await processRunner.RunAsync(
             "gpg",
-            ["--batch", "--no-autostart", "--with-colons", "--import-options", "show-only", "--import", keyPath],
+            ["--batch", "--no-autostart", "--with-colons", "--import-options", "show-only", "--import", toolKeyPath],
             planDirectory,
             GpgTimeout,
             gpgEnvironment,
@@ -54,18 +58,23 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
             throw new ReleaseFailureException("ReleaseKeyMismatch", "The downloaded FFmpeg release key has an unexpected fingerprint.");
         }
 
-        CommandResult importKey = await processRunner.RunAsync(
+        string verificationKeyring = Path.Combine(planDirectory, "ffmpeg-release-signing-key.gpg");
+        string toolVerificationKeyring = await ToToolPathAsync(
+            verificationKeyring,
+            planDirectory,
+            cancellationToken).ConfigureAwait(false);
+        CommandResult createKeyring = await processRunner.RunAsync(
             "gpg",
-            ["--batch", "--no-autostart", "--import", keyPath],
+            ["--batch", "--no-autostart", "--yes", "--dearmor", "--output", toolVerificationKeyring, toolKeyPath],
             planDirectory,
             GpgTimeout,
             gpgEnvironment,
             cancellationToken).ConfigureAwait(false);
-        EnsureSuccess(importKey, "ReleaseKeyImportFailed");
+        EnsureSuccess(createKeyring, "ReleaseKeyConversionFailed");
 
         CommandResult verify = await processRunner.RunAsync(
-            "gpg",
-            ["--batch", "--no-autostart", "--status-fd=1", "--verify", signaturePath, archivePath],
+            "gpgv",
+            ["--keyring", toolVerificationKeyring, "--status-fd=1", toolSignaturePath, toolArchivePath],
             planDirectory,
             GpgTimeout,
             gpgEnvironment,
@@ -92,6 +101,26 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
             System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(result, ReleaseJsonContext.Default.SourceVerificationResult),
             cancellationToken).ConfigureAwait(false);
         return result;
+    }
+
+    private async Task<string> ToToolPathAsync(
+        string path,
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return path;
+        }
+
+        CommandResult result = await processRunner.RunAsync(
+            "cygpath",
+            ["-u", path],
+            workingDirectory,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(result, "VerificationPathConversionFailed");
+        return result.StandardOutput.Trim();
     }
 
     private async Task DownloadAsync(Uri uri, string destination, CancellationToken cancellationToken)
