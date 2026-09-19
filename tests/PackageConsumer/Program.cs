@@ -34,7 +34,7 @@ static string Run(string executable, string argument)
     string error = process.StandardError.ReadToEnd();
     if (!process.WaitForExit(30_000))
     {
-        process.Kill(entireProcessTree: true);
+        process.Kill();
         throw new InvalidOperationException($"'{executable}' timed out: {error}");
     }
 

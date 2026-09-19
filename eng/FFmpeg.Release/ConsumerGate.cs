@@ -202,33 +202,48 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             $"-p:SupprocomFFmpegRuntimeIdentifier={runtime.Rid}",
             $"-p:TargetFramework={framework}"
         ];
+        var restoreArguments = new List<string> { "restore", project };
+        if (selfContained)
+        {
+            restoreArguments.AddRange(["--runtime", runtime.Rid]);
+        }
+
+        restoreArguments.AddRange(
+        [
+            "--packages", environment["NUGET_PACKAGES"]!,
+            "--configfile", environment["SUPPROCOM_NUGET_CONFIG"]!,
+            .. properties,
+            "--nologo"
+        ]);
         await RunDotnetAsync(
-            [
-                "restore", project,
-                "--runtime", runtime.Rid,
-                "--packages", environment["NUGET_PACKAGES"]!,
-                "--configfile", environment["SUPPROCOM_NUGET_CONFIG"]!,
-                .. properties,
-                "--nologo"
-            ],
+            restoreArguments,
             projectRoot,
             RestoreTimeout,
             environment,
             "ConsumerRestoreFailed",
             cancellationToken).ConfigureAwait(false);
+        var publishArguments = new List<string>
+        {
+            "publish", project,
+            "--configuration", "Release",
+            "--framework", framework
+        };
+        if (selfContained)
+        {
+            publishArguments.AddRange(["--runtime", runtime.Rid]);
+        }
+
+        publishArguments.AddRange(
+        [
+            "--self-contained", selfContained ? "true" : "false",
+            "--no-restore",
+            "--output", output,
+            .. properties,
+            .. extraPublishArguments,
+            "--nologo"
+        ]);
         await RunDotnetAsync(
-            [
-                "publish", project,
-                "--configuration", "Release",
-                "--framework", framework,
-                "--runtime", runtime.Rid,
-                "--self-contained", selfContained ? "true" : "false",
-                "--no-restore",
-                "--output", output,
-                .. properties,
-                .. extraPublishArguments,
-                "--nologo"
-            ],
+            publishArguments,
             projectRoot,
             BuildTimeout,
             environment,
