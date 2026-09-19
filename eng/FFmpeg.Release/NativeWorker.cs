@@ -202,7 +202,11 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         NormalizeLinks(installedBin);
         PruneRedundantLibraryAliases(installedBin, runtime);
         await NormalizeRuntimeSearchPathAsync(installedBin, runtime, cancellationToken).ConfigureAwait(false);
-        await StripBinariesAsync(installedBin, runtime, cancellationToken).ConfigureAwait(false);
+        await StripBinariesAsync(
+            installedBin,
+            runtime,
+            version.SourceDateEpoch.Value,
+            cancellationToken).ConfigureAwait(false);
         string payloadRoot = Path.Combine(resultRoot, "payload");
         CopyTree(installedBin, payloadRoot);
         AddComplianceFiles(repositoryRoot, sourceRoot, payloadRoot, version, flavor, runtime, configureArguments);
@@ -359,8 +363,13 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
     private async Task StripBinariesAsync(
         string payloadRoot,
         RuntimeDefinition runtime,
+        long sourceDateEpoch,
         CancellationToken cancellationToken)
     {
+        var deterministicEnvironment = new Dictionary<string, string?>
+        {
+            ["SOURCE_DATE_EPOCH"] = sourceDateEpoch.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        };
         foreach (string path in EnumerateNativeFiles(payloadRoot, runtime))
         {
             IReadOnlyList<string> arguments = runtime.Os == "macos"
@@ -371,6 +380,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments,
                 payloadRoot,
                 TimeSpan.FromSeconds(60),
+                deterministicEnvironment,
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             EnsureSuccess(result, "BinaryStripFailed");
         }
