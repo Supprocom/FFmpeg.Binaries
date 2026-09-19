@@ -20,6 +20,7 @@ internal static class SelfTests
         byte[] firstBytes = JsonSerializer.SerializeToUtf8Bytes(first, ReleaseJsonContext.Default.ReleasePlan);
         byte[] secondBytes = JsonSerializer.SerializeToUtf8Bytes(second, ReleaseJsonContext.Default.ReleasePlan);
         Require(SHA256.HashData(firstBytes).SequenceEqual(SHA256.HashData(secondBytes)), "deterministic plan hash");
+        Require(firstBytes.AsSpan().IndexOf("\r\n"u8) < 0, "platform-independent JSON newlines");
         Require(first.PackageIds.Count == 12, "source, core, nine runtimes, and facade packages");
         Require(first.PackageIds[^1] == "Supprocom.FFmpeg.Binaries", "facade publishes last");
         byte[] unsigned = CreateTestPackage("payload", signature: null);
@@ -43,7 +44,7 @@ internal static class SelfTests
         Require(
             windowsDependencies == "DLL Name: avcodec-63.dll\nDLL Name: KERNEL32.dll",
             "canonical Windows dependency evidence");
-        Console.WriteLine("Self-tests passed: 11/11");
+        Console.WriteLine("Self-tests passed: 12/12");
     }
 
     private static void Require(bool condition, string label)

@@ -131,6 +131,7 @@ internal sealed record ConsumerAttestation(
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     WriteIndented = true,
+    NewLine = "\n",
     UseStringEnumConverter = true)]
 [JsonSerializable(typeof(ReleaseMatrix))]
 [JsonSerializable(typeof(ReleasePlan))]
