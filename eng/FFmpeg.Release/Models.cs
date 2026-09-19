@@ -111,9 +111,22 @@ internal sealed record FrozenReleaseManifest(
     int SchemaVersion,
     string PlanSha256,
     string Version,
+    string ReleaseProgramCommit,
+    string MatrixSha256,
     bool CompleteRuntimeMatrix,
+    string SbomFileName,
+    string SbomSha256,
     IReadOnlyList<FrozenPackage> Packages,
     DateTimeOffset FrozenUtc);
+
+internal sealed record ConsumerAttestation(
+    int SchemaVersion,
+    string PlanSha256,
+    string ReleaseManifestSha256,
+    string Version,
+    string RuntimeIdentifier,
+    IReadOnlyList<string> Scenarios,
+    DateTimeOffset CompletedUtc);
 
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
@@ -127,4 +140,5 @@ internal sealed record FrozenReleaseManifest(
 [JsonSerializable(typeof(List<WorkerFile>))]
 [JsonSerializable(typeof(FrozenReleaseManifest))]
 [JsonSerializable(typeof(List<FrozenPackage>))]
+[JsonSerializable(typeof(ConsumerAttestation))]
 internal sealed partial class ReleaseJsonContext : JsonSerializerContext;

@@ -10,6 +10,7 @@ namespace Supprocom.FFmpeg.Release;
 internal sealed class PackageAssembler(ProcessRunner processRunner)
 {
     private static readonly TimeSpan PackTimeout = TimeSpan.FromMinutes(5);
+    private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
     private const long MaximumPackageBytes = 250L * 1024 * 1024;
 
     public async Task<string> AssembleAsync(
@@ -117,11 +118,19 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 cancellationToken).ConfigureAwait(false));
         }
 
+        const string sbomFileName = "release.spdx.json";
+        string sbomPath = Path.Combine(frozenDirectory, sbomFileName);
+        await WriteReleaseSbomAsync(sbomPath, plan, frozen, cancellationToken).ConfigureAwait(false);
+        string sbomHash = await HashFileAsync(sbomPath, cancellationToken).ConfigureAwait(false);
         var releaseManifest = new FrozenReleaseManifest(
             1,
             planHash,
             plan.PackageVersion,
+            plan.ReleaseProgramCommit,
+            plan.MatrixSha256,
             completeRuntimeMatrix,
+            sbomFileName,
+            sbomHash,
             frozen,
             DateTimeOffset.UtcNow);
         string manifestPath = Path.Combine(frozenDirectory, "release-manifest.json");
@@ -131,7 +140,8 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             cancellationToken).ConfigureAwait(false);
         await File.WriteAllLinesAsync(
             Path.Combine(frozenDirectory, "SHA256SUMS"),
-            frozen.Select(item => $"{item.Sha256}  {item.FileName}"),
+            frozen.Select(item => $"{item.Sha256}  {item.FileName}")
+                .Append($"{sbomHash}  {sbomFileName}"),
             Encoding.ASCII,
             cancellationToken).ConfigureAwait(false);
         string journalPath = Path.Combine(frozenDirectory, "publication-journal.jsonl");
@@ -147,6 +157,55 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         RecreateOwnedDirectory(packageWork, planDirectory);
         Directory.Delete(packageWork);
         return manifestPath;
+    }
+
+    private static async Task WriteReleaseSbomAsync(
+        string path,
+        ReleasePlan plan,
+        IReadOnlyList<FrozenPackage> packages,
+        CancellationToken cancellationToken)
+    {
+        object[] spdxPackages = packages.Select(package => (object)new
+        {
+            name = package.Id,
+            SPDXID = "SPDXRef-Package-" + package.Id,
+            versionInfo = package.Version,
+            downloadLocation = "NOASSERTION",
+            filesAnalyzed = false,
+            licenseConcluded = "LGPL-2.1-or-later",
+            licenseDeclared = "LGPL-2.1-or-later",
+            copyrightText = "NOASSERTION",
+            checksums = new[]
+            {
+                new { algorithm = "SHA256", checksumValue = package.Sha256 }
+            }
+        }).ToArray();
+        object[] relationships = packages.Select(package => (object)new
+        {
+            spdxElementId = "SPDXRef-DOCUMENT",
+            relationshipType = "DESCRIBES",
+            relatedSpdxElement = "SPDXRef-Package-" + package.Id
+        }).ToArray();
+        var document = new
+        {
+            spdxVersion = "SPDX-2.3",
+            dataLicense = "CC0-1.0",
+            SPDXID = "SPDXRef-DOCUMENT",
+            name = $"Supprocom.FFmpeg.Binaries-{plan.PackageVersion}",
+            documentNamespace = $"https://github.com/Supprocom/FFmpeg.Binaries/releases/{plan.PackageVersion}/{plan.ReleaseProgramCommit}/sbom",
+            creationInfo = new
+            {
+                created = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
+                creators = new[] { "Tool: Supprocom.FFmpeg.Release-1.0" }
+            },
+            packages = spdxPackages,
+            relationships
+        };
+        await File.WriteAllTextAsync(
+            path,
+            JsonSerializer.Serialize(document, IndentedJson) + "\n",
+            new UTF8Encoding(false),
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<string> PackCoreAsync(

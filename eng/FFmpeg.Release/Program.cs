@@ -57,13 +57,48 @@ internal static class Program
                     "Supprocom",
                     "FFmpeg.Binaries",
                     "consumer-gates");
+                string consumerCommit = await new RepositoryGate(runner).VerifyAsync(
+                    repositoryRoot,
+                    matrix.Repository.Origin,
+                    allowDirty: false,
+                    CancellationToken.None).ConfigureAwait(false);
                 await new ConsumerGate(runner).RunAsync(
                     repositoryRoot,
                     matrix,
+                    matrixHash,
+                    consumerCommit,
                     version,
                     runtime,
                     options.PackageRoot,
                     testRoot,
+                    options.ConsumerOutputRoot,
+                    CancellationToken.None).ConfigureAwait(false);
+                return 0;
+            }
+
+            if (options.Publish)
+            {
+                if (string.IsNullOrWhiteSpace(options.PackageRoot) ||
+                    string.IsNullOrWhiteSpace(options.AttestationRoot))
+                {
+                    throw new ReleaseFailureException(
+                        "PublicationArgumentsRequired",
+                        "Publication requires --package-root <directory> and --attestation-root <directory>.");
+                }
+
+                string publicationCommit = await new RepositoryGate(runner).VerifyAsync(
+                    repositoryRoot,
+                    matrix.Repository.Origin,
+                    allowDirty: false,
+                    CancellationToken.None).ConfigureAwait(false);
+                using var publicationClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+                await new PackagePublisher(publicationClient).PublishAsync(
+                    matrix,
+                    matrixHash,
+                    publicationCommit,
+                    version,
+                    options.PackageRoot,
+                    options.AttestationRoot,
                     CancellationToken.None).ConfigureAwait(false);
                 return 0;
             }
@@ -304,6 +339,7 @@ internal static class Program
         bool Assemble,
         bool AllowPartial,
         bool ConsumerGate,
+        bool Publish,
         string? RuntimeIdentifier,
         string? Version,
         string? ReleaseRoot,
@@ -311,7 +347,9 @@ internal static class Program
         string? WorkerArtifactRoot,
         string? PackageRoot,
         string? TestRoot,
-        string? PackageOutputRoot)
+        string? PackageOutputRoot,
+        string? ConsumerOutputRoot,
+        string? AttestationRoot)
     {
         public static Options Parse(string[] args)
         {
@@ -322,6 +360,7 @@ internal static class Program
             bool assemble = false;
             bool allowPartial = false;
             bool consumerGate = false;
+            bool publish = false;
             string? runtimeIdentifier = null;
             string? version = null;
             string? releaseRoot = null;
@@ -330,6 +369,8 @@ internal static class Program
             string? packageRoot = null;
             string? testRoot = null;
             string? packageOutputRoot = null;
+            string? consumerOutputRoot = null;
+            string? attestationRoot = null;
             for (int index = 0; index < args.Length; index++)
             {
                 switch (args[index])
@@ -355,6 +396,9 @@ internal static class Program
                     case "--consumer-gate":
                         consumerGate = true;
                         break;
+                    case "--publish":
+                        publish = true;
+                        break;
                     case "--rid" when index + 1 < args.Length:
                         runtimeIdentifier = args[++index];
                         break;
@@ -379,6 +423,12 @@ internal static class Program
                     case "--package-output-root" when index + 1 < args.Length:
                         packageOutputRoot = args[++index];
                         break;
+                    case "--consumer-output-root" when index + 1 < args.Length:
+                        consumerOutputRoot = args[++index];
+                        break;
+                    case "--attestation-root" when index + 1 < args.Length:
+                        attestationRoot = args[++index];
+                        break;
                     default:
                         throw new ReleaseFailureException("InvalidArguments", $"Unknown or incomplete argument '{args[index]}'.");
                 }
@@ -392,6 +442,7 @@ internal static class Program
                 assemble,
                 allowPartial,
                 consumerGate,
+                publish,
                 runtimeIdentifier,
                 version,
                 releaseRoot,
@@ -399,7 +450,9 @@ internal static class Program
                 workerArtifactRoot,
                 packageRoot,
                 testRoot,
-                packageOutputRoot);
+                packageOutputRoot,
+                consumerOutputRoot,
+                attestationRoot);
         }
     }
 }

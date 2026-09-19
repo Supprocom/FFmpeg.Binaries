@@ -342,6 +342,7 @@ jobs:
           --consumer-gate --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
           --package-root "${RUNNER_TEMP}/packages"
           --test-root "${RUNNER_TEMP}/consumer-gates"
+          --consumer-output-root "${RUNNER_TEMP}/consumer-attestations"
 
       - name: Run Windows consumer gate
         if: runner.os == 'Windows'
@@ -351,6 +352,15 @@ jobs:
           --consumer-gate --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
           --package-root "${env:RUNNER_TEMP}/packages"
           --test-root "${env:RUNNER_TEMP}/consumer-gates"
+          --consumer-output-root "${env:RUNNER_TEMP}/consumer-attestations"
+
+      - name: Upload consumer attestation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: consumer-${{ matrix.rid }}
+          path: ${{ runner.temp }}/consumer-attestations
+          if-no-files-found: error
+          retention-days: 14
 
   consumer-musl:
     name: Consume ${{ matrix.rid }}
@@ -395,5 +405,72 @@ jobs:
               dotnet run --project FFmpeg.Release.csproj --configuration Release -- \
                 --consumer-gate --version "${RELEASE_VERSION}" --rid "${RELEASE_RID}" \
                 --package-root /runner-temp/packages \
-                --test-root /runner-temp/consumer-gates
+                --test-root /runner-temp/consumer-gates \
+                --consumer-output-root /runner-temp/consumer-attestations
             '
+
+      - name: Upload consumer attestation
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: consumer-${{ matrix.rid }}
+          path: ${{ runner.temp }}/consumer-attestations
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish frozen package family
+    needs:
+      - consumer-native
+      - consumer-musl
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Download frozen package family
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: frozen-packages-${{ inputs.version }}
+          path: ${{ runner.temp }}/packages
+
+      - name: Download all target-native consumer attestations
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: consumer-*
+          path: ${{ runner.temp }}/consumer-attestations
+          merge-multiple: true
+
+      - name: Preflight, publish, and verify both package feeds
+        env:
+          SUPPROCOM_NUGET_API_KEY: ${{ secrets.SUPPROCOM_NUGET_API_KEY }}
+          SUPPROCOM_GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          SUPPROCOM_GITHUB_PACKAGES_USER: ${{ github.actor }}
+        run: >-
+          dotnet run --project FFmpeg.Release.csproj --configuration Release --
+          --publish --version "${{ inputs.version }}"
+          --package-root "${RUNNER_TEMP}/packages"
+          --attestation-root "${RUNNER_TEMP}/consumer-attestations"
+
+      - name: Preserve publication evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: publication-evidence-${{ inputs.version }}
+          path: |
+            ${{ runner.temp }}/packages/release-manifest.json
+            ${{ runner.temp }}/packages/release.spdx.json
+            ${{ runner.temp }}/packages/SHA256SUMS
+            ${{ runner.temp }}/packages/publication-journal.jsonl
+          if-no-files-found: error
+          retention-days: 30

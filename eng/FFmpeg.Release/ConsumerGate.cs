@@ -14,21 +14,27 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
     public async Task RunAsync(
         string repositoryRoot,
         ReleaseMatrix matrix,
+        string matrixHash,
+        string releaseCommit,
         VersionDefinition version,
         RuntimeDefinition runtime,
         string packageRoot,
         string testRoot,
+        string? consumerOutputRoot,
         CancellationToken cancellationToken)
     {
         ValidateHost(runtime);
         string packages = Path.GetFullPath(packageRoot);
         FrozenReleaseManifest release = await ValidateFrozenSetAsync(
             matrix,
+            matrixHash,
+            releaseCommit,
             version,
             packages,
             cancellationToken).ConfigureAwait(false);
 
         string root = PrepareTestRoot(repositoryRoot, testRoot, runtime.Rid);
+        var scenarios = new List<string>();
         string cache = Path.Combine(root, "nuget-cache");
         Directory.CreateDirectory(cache);
         var environment = new Dictionary<string, string?>
@@ -54,6 +60,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             selfContained: true,
             [],
             cancellationToken).ConfigureAwait(false);
+        scenarios.Add("runtime-self-contained-net10.0");
         await PublishAndRunAsync(
             repositoryRoot,
             packages,
@@ -67,6 +74,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             selfContained: false,
             [],
             cancellationToken).ConfigureAwait(false);
+        scenarios.Add("facade-framework-dependent-net10.0");
 
         await RunWrapperAsync(
             repositoryRoot,
@@ -77,6 +85,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             version.Version,
             "FFMpegCoreConsumer",
             cancellationToken).ConfigureAwait(false);
+        scenarios.Add("ffmpegcore-5.4.0");
         await RunWrapperAsync(
             repositoryRoot,
             packages,
@@ -86,6 +95,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             version.Version,
             "XabeConsumer",
             cancellationToken).ConfigureAwait(false);
+        scenarios.Add("xabe-ffmpeg-6.0.2");
 
         if (runtime.Rid == "linux-x64")
         {
@@ -102,6 +112,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 selfContained: true,
                 [],
                 cancellationToken).ConfigureAwait(false);
+            scenarios.Add("facade-self-contained-net8.0");
             await PublishAndRunAsync(
                 repositoryRoot,
                 packages,
@@ -115,6 +126,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 selfContained: true,
                 ["-p:PublishTrimmed=true"],
                 cancellationToken).ConfigureAwait(false);
+            scenarios.Add("facade-trimmed-net10.0");
             await PublishAndRunAsync(
                 repositoryRoot,
                 packages,
@@ -128,6 +140,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 selfContained: true,
                 ["-p:PublishSingleFile=true"],
                 cancellationToken).ConfigureAwait(false);
+            scenarios.Add("facade-single-file-net10.0");
         }
 
         if (runtime.Rid == "win-x64")
@@ -140,7 +153,22 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 runtime,
                 version.Version,
                 cancellationToken).ConfigureAwait(false);
+            scenarios.Add("sdk-style-net48-build");
         }
+
+        string releaseManifestPath = Path.Combine(packages, "release-manifest.json");
+        var attestation = new ConsumerAttestation(
+            1,
+            release.PlanSha256,
+            await HashFileAsync(releaseManifestPath, cancellationToken).ConfigureAwait(false),
+            version.Version,
+            runtime.Rid,
+            scenarios,
+            DateTimeOffset.UtcNow);
+        WriteAttestation(
+            repositoryRoot,
+            consumerOutputRoot ?? Path.Combine(root, "attestations"),
+            attestation);
 
         Console.WriteLine(
             $"Consumer gate passed for {runtime.Rid}: {release.Packages.Count} frozen packages, direct package, facade, and wrapper integrations.");
@@ -322,6 +350,8 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
 
     private static async Task<FrozenReleaseManifest> ValidateFrozenSetAsync(
         ReleaseMatrix matrix,
+        string matrixHash,
+        string releaseCommit,
         VersionDefinition version,
         string packageRoot,
         CancellationToken cancellationToken)
@@ -339,9 +369,20 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
         int expectedCount = matrix.RuntimeIdentifiers.Count + 3;
         if (!manifest.CompleteRuntimeMatrix ||
             !manifest.Version.Equals(version.Version, StringComparison.Ordinal) ||
+            !manifest.MatrixSha256.Equals(matrixHash, StringComparison.Ordinal) ||
+            !manifest.ReleaseProgramCommit.Equals(releaseCommit, StringComparison.Ordinal) ||
             manifest.Packages.Count != expectedCount)
         {
             throw new ReleaseFailureException("FrozenPackageSetIncomplete", "Consumer gates require the complete exact-version package family.");
+        }
+
+        string sbomPath = Path.Combine(packageRoot, manifest.SbomFileName);
+        if (!Path.GetFileName(manifest.SbomFileName).Equals(manifest.SbomFileName, StringComparison.Ordinal) ||
+            !File.Exists(sbomPath) ||
+            !(await HashFileAsync(sbomPath, cancellationToken).ConfigureAwait(false))
+                .Equals(manifest.SbomSha256, StringComparison.Ordinal))
+        {
+            throw new ReleaseFailureException("ReleaseSbomInvalid", "The frozen release SBOM is missing or changed.");
         }
 
         foreach (FrozenPackage package in manifest.Packages)
@@ -396,6 +437,36 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
 
         Directory.CreateDirectory(root);
         return root;
+    }
+
+    private static void WriteAttestation(
+        string repositoryRoot,
+        string configuredRoot,
+        ConsumerAttestation attestation)
+    {
+        string root = Path.GetFullPath(configuredRoot);
+        StringComparison comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        string repositoryPrefix = Path.GetFullPath(repositoryRoot).TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if ((root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar)
+            .StartsWith(repositoryPrefix, comparison))
+        {
+            throw new ReleaseFailureException("ConsumerAttestationInsideRepository", "Consumer attestations must be written outside the source checkout.");
+        }
+
+        Directory.CreateDirectory(root);
+        string path = Path.Combine(root, attestation.RuntimeIdentifier + ".json");
+        if (File.Exists(path))
+        {
+            throw new ReleaseFailureException("ConsumerAttestationExists", $"A consumer attestation already exists for {attestation.RuntimeIdentifier}.");
+        }
+
+        File.WriteAllBytes(
+            path,
+            JsonSerializer.SerializeToUtf8Bytes(attestation, ReleaseJsonContext.Default.ConsumerAttestation));
     }
 
     private static string CopyFixture(string repositoryRoot, string root, string fixture, string scenario)

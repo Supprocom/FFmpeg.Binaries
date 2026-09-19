@@ -1,4 +1,6 @@
+using System.IO.Compression;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace Supprocom.FFmpeg.Release;
@@ -20,7 +22,17 @@ internal static class SelfTests
         Require(SHA256.HashData(firstBytes).SequenceEqual(SHA256.HashData(secondBytes)), "deterministic plan hash");
         Require(first.PackageIds.Count == 12, "source, core, nine runtimes, and facade packages");
         Require(first.PackageIds[^1] == "Supprocom.FFmpeg.Binaries", "facade publishes last");
-        Console.WriteLine("Self-tests passed: 5/5");
+        byte[] unsigned = CreateTestPackage("payload", signature: null);
+        byte[] repositorySigned = CreateTestPackage("payload", signature: "repository-signature");
+        byte[] changed = CreateTestPackage("changed-payload", signature: "repository-signature");
+        string unsignedIdentity = PackagePublisher.ComputePackageContentIdentity(unsigned);
+        Require(
+            unsignedIdentity == PackagePublisher.ComputePackageContentIdentity(repositorySigned),
+            "repository signature does not change package content identity");
+        Require(
+            unsignedIdentity != PackagePublisher.ComputePackageContentIdentity(changed),
+            "package content identity detects changed payload bytes");
+        Console.WriteLine("Self-tests passed: 7/7");
     }
 
     private static void Require(bool condition, string label)
@@ -29,5 +41,29 @@ internal static class SelfTests
         {
             throw new ReleaseFailureException("SelfTestFailed", $"Release-program self-test failed: {label}.");
         }
+    }
+
+    private static byte[] CreateTestPackage(string payload, string? signature)
+    {
+        using var output = new MemoryStream();
+        using (var archive = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            WriteEntry(archive, "test.nuspec", "<package />");
+            WriteEntry(archive, "runtimes/test/native/ffmpeg/ffmpeg", payload);
+            if (signature is not null)
+            {
+                WriteEntry(archive, ".signature.p7s", signature);
+            }
+        }
+
+        return output.ToArray();
+    }
+
+    private static void WriteEntry(ZipArchive archive, string name, string content)
+    {
+        ZipArchiveEntry entry = archive.CreateEntry(name, CompressionLevel.NoCompression);
+        using Stream stream = entry.Open();
+        byte[] bytes = Encoding.UTF8.GetBytes(content);
+        stream.Write(bytes);
     }
 }
