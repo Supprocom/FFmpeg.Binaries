@@ -3,7 +3,7 @@ name: FFmpeg release
 on:
   push:
     branches:
-      - codex/ffmpeg-release-system
+      - master
   workflow_dispatch:
     inputs:
       version:
