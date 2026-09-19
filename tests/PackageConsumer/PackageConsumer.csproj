@@ -6,11 +6,13 @@
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == '' and !$([System.String]::Copy('$(TargetFramework)').StartsWith('net4'))">linux-x64</RuntimeIdentifier>
+    <TestRid Condition="'$(TestRid)' == ''">linux-x64</TestRid>
+    <SupprocomPackageId Condition="'$(SupprocomPackageId)' == ''">Supprocom.FFmpeg.Binaries.$(TestRid)</SupprocomPackageId>
+    <SupprocomPackageVersion Condition="'$(SupprocomPackageVersion)' == ''">9.0.2</SupprocomPackageVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Supprocom.FFmpeg.Binaries.linux-x64" Version="9.0.2" />
+    <PackageReference Include="$(SupprocomPackageId)" Version="$(SupprocomPackageVersion)" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies"
                       Version="1.0.3"
                       PrivateAssets="all"

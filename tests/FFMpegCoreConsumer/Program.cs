@@ -3,6 +3,12 @@ using FFMpegCore;
 using Supprocom.FFmpeg;
 
 FFmpegBinaries.Validate();
+string expectedRuntimeIdentifier = Environment.GetEnvironmentVariable("SUPPROCOM_TEST_RID") ?? "linux-x64";
+if (!FFmpegBinaries.RuntimeIdentifier.Equals(expectedRuntimeIdentifier, StringComparison.Ordinal))
+{
+    throw new InvalidOperationException($"Unexpected payload Runtime Identifier '{FFmpegBinaries.RuntimeIdentifier}'.");
+}
+
 GlobalFFOptions.Configure(new FFOptions
 {
     BinaryFolder = FFmpegBinaries.Directory,

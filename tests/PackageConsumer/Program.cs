@@ -2,7 +2,8 @@ using System.Diagnostics;
 using Supprocom.FFmpeg;
 
 FFmpegBinaries.Validate();
-if (!FFmpegBinaries.RuntimeIdentifier.Equals("linux-x64", StringComparison.Ordinal))
+string expectedRuntimeIdentifier = Environment.GetEnvironmentVariable("SUPPROCOM_TEST_RID") ?? "linux-x64";
+if (!FFmpegBinaries.RuntimeIdentifier.Equals(expectedRuntimeIdentifier, StringComparison.Ordinal))
 {
     throw new InvalidOperationException($"Unexpected payload Runtime Identifier '{FFmpegBinaries.RuntimeIdentifier}'.");
 }

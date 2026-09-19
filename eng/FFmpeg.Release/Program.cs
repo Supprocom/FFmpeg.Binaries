@@ -37,6 +37,37 @@ internal static class Program
             VersionDefinition version = SelectVersion(matrix, options.Version);
             FlavorDefinition flavor = matrix.Flavors.Single(item => item.Name.Equals("lgpl", StringComparison.Ordinal));
             var runner = new ProcessRunner();
+            if (options.ConsumerGate)
+            {
+                if (string.IsNullOrWhiteSpace(options.RuntimeIdentifier) ||
+                    string.IsNullOrWhiteSpace(options.PackageRoot))
+                {
+                    throw new ReleaseFailureException(
+                        "ConsumerArgumentsRequired",
+                        "Consumer-gate mode requires --rid <Runtime Identifier> and --package-root <directory>.");
+                }
+
+                RuntimeDefinition runtime = matrix.RuntimeIdentifiers.SingleOrDefault(
+                    item => item.Rid.Equals(options.RuntimeIdentifier, StringComparison.Ordinal))
+                    ?? throw new ReleaseFailureException(
+                        "UnsupportedRuntimeIdentifier",
+                        $"Runtime Identifier '{options.RuntimeIdentifier}' is not in the approved matrix.");
+                string testRoot = options.TestRoot ?? Path.Combine(
+                    Path.GetTempPath(),
+                    "Supprocom",
+                    "FFmpeg.Binaries",
+                    "consumer-gates");
+                await new ConsumerGate(runner).RunAsync(
+                    repositoryRoot,
+                    matrix,
+                    version,
+                    runtime,
+                    options.PackageRoot,
+                    testRoot,
+                    CancellationToken.None).ConfigureAwait(false);
+                return 0;
+            }
+
             string releaseCommit = await new RepositoryGate(runner).VerifyAsync(
                 repositoryRoot,
                 matrix.Repository.Origin,
@@ -75,6 +106,7 @@ internal static class Program
                     flavor,
                     runtime,
                     source,
+                    options.WorkerOutputRoot,
                     CancellationToken.None).ConfigureAwait(false);
                 Console.WriteLine($"Accepted worker manifest: {manifestPath}");
                 return 0;
@@ -109,11 +141,20 @@ internal static class Program
                     plan,
                     planHash,
                     planDirectory,
+                    options.WorkerArtifactRoot,
                     flavor,
                     source,
                     packageRuntimes,
                     completeRuntimeMatrix: !options.AllowPartial,
                     CancellationToken.None).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(options.PackageOutputRoot))
+                {
+                    ExportFrozenRelease(
+                        repositoryRoot,
+                        Path.GetDirectoryName(manifestPath)!,
+                        options.PackageOutputRoot);
+                }
+
                 Console.WriteLine($"Frozen release manifest: {manifestPath}");
                 return 0;
             }
@@ -221,6 +262,40 @@ internal static class Program
         throw new ReleaseFailureException("RepositoryRootNotFound", "Run the release program from the repository root.");
     }
 
+    private static void ExportFrozenRelease(string repositoryRoot, string frozenRoot, string configuredOutput)
+    {
+        string output = Path.GetFullPath(configuredOutput);
+        string filesystemRoot = Path.GetPathRoot(output) ?? string.Empty;
+        StringComparison comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (output.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .Equals(filesystemRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), comparison))
+        {
+            throw new ReleaseFailureException("UnsafePackageExportPath", "The package export directory cannot be a filesystem root.");
+        }
+
+        string repositoryPrefix = Path.GetFullPath(repositoryRoot).TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if ((output.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar)
+            .StartsWith(repositoryPrefix, comparison))
+        {
+            throw new ReleaseFailureException("PackageExportInsideRepository", "Frozen packages must be exported outside the source checkout.");
+        }
+
+        if (Directory.Exists(output) && Directory.EnumerateFileSystemEntries(output).Any())
+        {
+            throw new ReleaseFailureException("PackageExportNotEmpty", "The package export directory must be empty.");
+        }
+
+        Directory.CreateDirectory(output);
+        foreach (string source in Directory.EnumerateFiles(frozenRoot, "*", SearchOption.TopDirectoryOnly))
+        {
+            File.Copy(source, Path.Combine(output, Path.GetFileName(source)), overwrite: false);
+        }
+    }
+
     private sealed record Options(
         bool SelfTest,
         bool AllowDirty,
@@ -228,9 +303,15 @@ internal static class Program
         bool Worker,
         bool Assemble,
         bool AllowPartial,
+        bool ConsumerGate,
         string? RuntimeIdentifier,
         string? Version,
-        string? ReleaseRoot)
+        string? ReleaseRoot,
+        string? WorkerOutputRoot,
+        string? WorkerArtifactRoot,
+        string? PackageRoot,
+        string? TestRoot,
+        string? PackageOutputRoot)
     {
         public static Options Parse(string[] args)
         {
@@ -240,9 +321,15 @@ internal static class Program
             bool worker = false;
             bool assemble = false;
             bool allowPartial = false;
+            bool consumerGate = false;
             string? runtimeIdentifier = null;
             string? version = null;
             string? releaseRoot = null;
+            string? workerOutputRoot = null;
+            string? workerArtifactRoot = null;
+            string? packageRoot = null;
+            string? testRoot = null;
+            string? packageOutputRoot = null;
             for (int index = 0; index < args.Length; index++)
             {
                 switch (args[index])
@@ -265,6 +352,9 @@ internal static class Program
                     case "--allow-partial":
                         allowPartial = true;
                         break;
+                    case "--consumer-gate":
+                        consumerGate = true;
+                        break;
                     case "--rid" when index + 1 < args.Length:
                         runtimeIdentifier = args[++index];
                         break;
@@ -273,6 +363,21 @@ internal static class Program
                         break;
                     case "--release-root" when index + 1 < args.Length:
                         releaseRoot = args[++index];
+                        break;
+                    case "--worker-output-root" when index + 1 < args.Length:
+                        workerOutputRoot = args[++index];
+                        break;
+                    case "--worker-artifact-root" when index + 1 < args.Length:
+                        workerArtifactRoot = args[++index];
+                        break;
+                    case "--package-root" when index + 1 < args.Length:
+                        packageRoot = args[++index];
+                        break;
+                    case "--test-root" when index + 1 < args.Length:
+                        testRoot = args[++index];
+                        break;
+                    case "--package-output-root" when index + 1 < args.Length:
+                        packageOutputRoot = args[++index];
                         break;
                     default:
                         throw new ReleaseFailureException("InvalidArguments", $"Unknown or incomplete argument '{args[index]}'.");
@@ -286,9 +391,15 @@ internal static class Program
                 worker,
                 assemble,
                 allowPartial,
+                consumerGate,
                 runtimeIdentifier,
                 version,
-                releaseRoot);
+                releaseRoot,
+                workerOutputRoot,
+                workerArtifactRoot,
+                packageRoot,
+                testRoot,
+                packageOutputRoot);
         }
     }
 }

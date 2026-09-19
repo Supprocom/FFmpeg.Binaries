@@ -1,0 +1,399 @@
+name: FFmpeg release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Approved FFmpeg and package version
+        required: true
+        default: 9.0.2
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ffmpeg-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  validate:
+    name: Validate release engine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Build and self-test the release engine
+        run: |
+          dotnet build FFmpeg.Release.csproj --configuration Release --nologo
+          dotnet run --project FFmpeg.Release.csproj --configuration Release --no-build -- --self-test
+          dotnet run --project FFmpeg.Release.csproj --configuration Release --no-build -- --emit-worker-matrix
+
+  worker-linux:
+    name: Build ${{ matrix.rid }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            runner: ubuntu-24.04
+          - rid: linux-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends build-essential file gnupg nasm patchelf xz-utils
+
+      - name: Produce independently reproduced native payload
+        run: >-
+          dotnet run --project FFmpeg.Release.csproj --configuration Release --
+          --worker --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
+          --release-root "${RUNNER_TEMP}/release"
+          --worker-output-root "${RUNNER_TEMP}/worker-artifacts"
+
+      - name: Upload accepted worker evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: worker-${{ matrix.rid }}
+          path: ${{ runner.temp }}/worker-artifacts
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  worker-musl:
+    name: Build ${{ matrix.rid }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-musl-x64
+            runner: ubuntu-24.04
+          - rid: linux-musl-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Produce independently reproduced musl payload
+        env:
+          RELEASE_RID: ${{ matrix.rid }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SDK_IMAGE: mcr.microsoft.com/dotnet/sdk@sha256:3f9c03432d664163a90d20e3ed0a3784d0aa82c1b9cbd1a7dd4609fede95669e
+        run: |
+          docker run --rm \
+            --env RELEASE_RID \
+            --env RELEASE_VERSION \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --volume "${RUNNER_TEMP}:/runner-temp" \
+            --workdir /workspace \
+            "${SDK_IMAGE}" \
+            sh -euxc '
+              apk add --no-cache bash build-base file git gnupg nasm patchelf tar xz
+              git config --global --add safe.directory /workspace
+              dotnet run --project FFmpeg.Release.csproj --configuration Release -- \
+                --worker --version "${RELEASE_VERSION}" --rid "${RELEASE_RID}" \
+                --release-root /runner-temp/release \
+                --worker-output-root /runner-temp/worker-artifacts
+            '
+
+      - name: Upload accepted worker evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: worker-${{ matrix.rid }}
+          path: ${{ runner.temp }}/worker-artifacts
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  worker-macos:
+    name: Build ${{ matrix.rid }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: osx-x64
+            runner: macos-15-intel
+          - rid: osx-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Install native build prerequisites
+        run: brew install gnupg nasm
+
+      - name: Produce independently reproduced native payload
+        run: >-
+          dotnet run --project FFmpeg.Release.csproj --configuration Release --
+          --worker --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
+          --release-root "${RUNNER_TEMP}/release"
+          --worker-output-root "${RUNNER_TEMP}/worker-artifacts"
+
+      - name: Upload accepted worker evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: worker-${{ matrix.rid }}
+          path: ${{ runner.temp }}/worker-artifacts
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  worker-windows:
+    name: Build ${{ matrix.rid }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x86
+            runner: windows-2025
+            msystem: MINGW32
+            deprecation: msystem-mingw32
+          - rid: win-x64
+            runner: windows-2025
+            msystem: UCRT64
+            deprecation: ""
+          - rid: win-arm64
+            runner: windows-11-arm
+            msystem: CLANGARM64
+            deprecation: ""
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    steps:
+      - name: Preserve repository line endings
+        run: git config --global core.autocrlf input
+
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Install MSYS2 build prerequisites
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          path-type: inherit
+          suppress-deprecation-warnings: ${{ matrix.deprecation }}
+          install: >-
+            base-devel
+            diffutils
+            file
+            git
+            gnupg
+            nasm
+            tar
+            xz
+          pacboy: >-
+            toolchain:p
+
+      - name: Produce independently reproduced native payload
+        shell: msys2 {0}
+        run: |
+          dotnet run --project FFmpeg.Release.csproj --configuration Release -- \
+            --worker --version "${{ inputs.version }}" --rid "${{ matrix.rid }}" \
+            --release-root "${RUNNER_TEMP}/release" \
+            --worker-output-root "${RUNNER_TEMP}/worker-artifacts"
+
+      - name: Upload accepted worker evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: worker-${{ matrix.rid }}
+          path: ${{ runner.temp }}/worker-artifacts
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Assemble and freeze package family
+    needs:
+      - worker-linux
+      - worker-musl
+      - worker-macos
+      - worker-windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Download all accepted worker evidence
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: worker-*
+          path: ${{ runner.temp }}/worker-artifacts
+          merge-multiple: true
+
+      - name: Assemble and freeze exact package bytes
+        run: >-
+          dotnet run --project FFmpeg.Release.csproj --configuration Release --
+          --assemble --version "${{ inputs.version }}"
+          --release-root "${RUNNER_TEMP}/release"
+          --worker-artifact-root "${RUNNER_TEMP}/worker-artifacts"
+          --package-output-root "${RUNNER_TEMP}/package-artifacts"
+
+      - name: Upload frozen package family
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: frozen-packages-${{ inputs.version }}
+          path: ${{ runner.temp }}/package-artifacts
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  consumer-native:
+    name: Consume ${{ matrix.rid }}
+    needs: assemble
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x86
+            runner: windows-2025
+          - rid: win-x64
+            runner: windows-2025
+          - rid: win-arm64
+            runner: windows-11-arm
+          - rid: linux-x64
+            runner: ubuntu-24.04
+          - rid: linux-arm64
+            runner: ubuntu-24.04-arm
+          - rid: osx-x64
+            runner: macos-15-intel
+          - rid: osx-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Download frozen package family
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: frozen-packages-${{ inputs.version }}
+          path: ${{ runner.temp }}/packages
+
+      - name: Run Unix consumer gate
+        if: runner.os != 'Windows'
+        run: >-
+          dotnet run --project FFmpeg.Release.csproj --configuration Release --
+          --consumer-gate --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
+          --package-root "${RUNNER_TEMP}/packages"
+          --test-root "${RUNNER_TEMP}/consumer-gates"
+
+      - name: Run Windows consumer gate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          dotnet run --project FFmpeg.Release.csproj --configuration Release --
+          --consumer-gate --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
+          --package-root "${env:RUNNER_TEMP}/packages"
+          --test-root "${env:RUNNER_TEMP}/consumer-gates"
+
+  consumer-musl:
+    name: Consume ${{ matrix.rid }}
+    needs: assemble
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-musl-x64
+            runner: ubuntu-24.04
+          - rid: linux-musl-arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out the release commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Download frozen package family
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: frozen-packages-${{ inputs.version }}
+          path: ${{ runner.temp }}/packages
+
+      - name: Run musl consumer gate
+        env:
+          RELEASE_RID: ${{ matrix.rid }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SDK_IMAGE: mcr.microsoft.com/dotnet/sdk@sha256:3f9c03432d664163a90d20e3ed0a3784d0aa82c1b9cbd1a7dd4609fede95669e
+        run: |
+          docker run --rm \
+            --env RELEASE_RID \
+            --env RELEASE_VERSION \
+            --volume "${GITHUB_WORKSPACE}:/workspace" \
+            --volume "${RUNNER_TEMP}:/runner-temp" \
+            --workdir /workspace \
+            "${SDK_IMAGE}" \
+            sh -euxc '
+              apk add --no-cache git
+              dotnet run --project FFmpeg.Release.csproj --configuration Release -- \
+                --consumer-gate --version "${RELEASE_VERSION}" --rid "${RELEASE_RID}" \
+                --package-root /runner-temp/packages \
+                --test-root /runner-temp/consumer-gates
+            '

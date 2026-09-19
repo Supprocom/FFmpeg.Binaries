@@ -37,6 +37,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         FlavorDefinition flavor,
         RuntimeDefinition runtime,
         SourceVerificationResult source,
+        string? workerOutputRoot,
         CancellationToken cancellationToken)
     {
         ValidateWorkerHost(runtime);
@@ -109,6 +110,11 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             manifestHash + "  worker-manifest.json\n",
             Encoding.ASCII,
             cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(workerOutputRoot))
+        {
+            ExportAcceptedWorker(repositoryRoot, workerOutputRoot, runtime.Rid, acceptedRoot);
+        }
+
         RecreateOwnedDirectory(workRoot, planDirectory);
         Directory.Delete(workRoot);
         return manifestPath;
@@ -201,6 +207,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         string payloadRoot = Path.Combine(resultRoot, "payload");
         CopyTree(installedBin, payloadRoot);
         AddComplianceFiles(repositoryRoot, sourceRoot, payloadRoot, version, flavor, runtime, configureArguments);
+        NormalizePayloadPermissions(payloadRoot);
         ValidateExpectedPayload(payloadRoot, runtime);
         string architectureEvidence = await InspectArchitectureAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         string dependencyEvidence = await InspectDynamicDependenciesAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
@@ -247,6 +254,19 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add("--target-os=mingw32");
                 arguments.Add($"--arch={ToConfigureArchitecture(runtime.Architecture)}");
                 arguments.Add("--enable-w32threads");
+                if (runtime.Architecture == "arm64")
+                {
+                    arguments.Add("--cc=clang");
+                    arguments.Add("--cxx=clang++");
+                    arguments.Add("--ar=llvm-ar");
+                    arguments.Add("--nm=llvm-nm");
+                    arguments.Add("--ranlib=llvm-ranlib");
+                    arguments.Add("--strip=llvm-strip");
+                }
+                else
+                {
+                    arguments.Add("--cc=gcc");
+                }
                 break;
             default:
                 throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is not implemented.");
@@ -259,13 +279,12 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         string sourceRoot,
         IReadOnlyList<string> configureArguments)
     {
-        string configurePath = Path.Combine(sourceRoot, "configure");
         if (OperatingSystem.IsWindows())
         {
-            return ("bash", [configurePath, .. configureArguments]);
+            return ("bash", ["./configure", .. configureArguments]);
         }
 
-        return (configurePath, configureArguments);
+        return (Path.Combine(sourceRoot, "configure"), configureArguments);
     }
 
     private async Task<string> ToToolPathAsync(string path, string workingDirectory, CancellationToken cancellationToken)
@@ -730,6 +749,66 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         return string.Empty;
     }
 
+    private static void NormalizePayloadPermissions(string payloadRoot)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const UnixFileMode readOnlyData =
+            UnixFileMode.UserRead | UnixFileMode.UserWrite |
+            UnixFileMode.GroupRead | UnixFileMode.OtherRead;
+        const UnixFileMode executable =
+            readOnlyData |
+            UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute;
+        File.SetUnixFileMode(payloadRoot, executable);
+        foreach (string directory in Directory.EnumerateDirectories(payloadRoot, "*", SearchOption.AllDirectories))
+        {
+            File.SetUnixFileMode(directory, executable);
+        }
+
+        foreach (string file in Directory.EnumerateFiles(payloadRoot, "*", SearchOption.AllDirectories))
+        {
+            bool isNative = Path.GetFileName(file) is "ffmpeg" or "ffprobe" ||
+                Path.GetFileName(file).Contains(".so", StringComparison.Ordinal) ||
+                file.EndsWith(".dylib", StringComparison.Ordinal);
+            File.SetUnixFileMode(file, isNative ? executable : readOnlyData);
+        }
+    }
+
+    private static void ExportAcceptedWorker(
+        string repositoryRoot,
+        string configuredRoot,
+        string runtimeIdentifier,
+        string acceptedRoot)
+    {
+        string exportRoot = Path.GetFullPath(configuredRoot);
+        string rootPath = Path.GetPathRoot(exportRoot) ?? string.Empty;
+        StringComparison comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (exportRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                .Equals(rootPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), comparison))
+        {
+            throw new ReleaseFailureException("UnsafeWorkerExportPath", "The worker export root cannot be a filesystem root.");
+        }
+
+        string repositoryPrefix = Path.GetFullPath(repositoryRoot).TrimEnd(
+            Path.DirectorySeparatorChar,
+            Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if ((exportRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar)
+            .StartsWith(repositoryPrefix, comparison))
+        {
+            throw new ReleaseFailureException("WorkerExportInsideRepository", "Worker artifacts must be exported outside the source checkout.");
+        }
+
+        Directory.CreateDirectory(exportRoot);
+        string destination = Path.Combine(exportRoot, runtimeIdentifier);
+        RecreateOwnedDirectory(destination, exportRoot);
+        CopyTree(acceptedRoot, destination);
+    }
+
     private static void CopyTree(string source, string destination)
     {
         Directory.CreateDirectory(destination);
@@ -789,6 +868,22 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         if (runtime.Os == "linux" && File.Exists("/etc/alpine-release"))
         {
             throw new ReleaseFailureException("WorkerLibcMismatch", $"Runtime Identifier '{runtime.Rid}' requires a glibc worker.");
+        }
+
+        Architecture processArchitecture = RuntimeInformation.ProcessArchitecture;
+        bool matchesArchitecture = runtime.Architecture switch
+        {
+            "x86" => OperatingSystem.IsWindows() &&
+                (processArchitecture == Architecture.X86 || processArchitecture == Architecture.X64),
+            "x64" => processArchitecture == Architecture.X64,
+            "arm64" => processArchitecture == Architecture.Arm64,
+            _ => false
+        };
+        if (!matchesArchitecture)
+        {
+            throw new ReleaseFailureException(
+                "WorkerArchitectureMismatch",
+                $"Runtime Identifier '{runtime.Rid}' cannot run its smoke test on {processArchitecture}.");
         }
     }
 

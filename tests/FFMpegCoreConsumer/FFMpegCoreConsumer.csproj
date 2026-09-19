@@ -5,11 +5,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
+    <TestRid Condition="'$(TestRid)' == ''">linux-x64</TestRid>
+    <SupprocomPackageVersion Condition="'$(SupprocomPackageVersion)' == ''">9.0.2</SupprocomPackageVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Supprocom.FFmpeg.Binaries.linux-x64" Version="9.0.2" />
+    <PackageReference Include="Supprocom.FFmpeg.Binaries.$(TestRid)" Version="$(SupprocomPackageVersion)" />
     <PackageReference Include="FFMpegCore" Version="5.4.0" />
   </ItemGroup>
 </Project>

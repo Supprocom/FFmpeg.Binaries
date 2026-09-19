@@ -3,6 +3,12 @@ using Supprocom.FFmpeg;
 using Xabe.FFmpeg;
 
 FFmpegBinaries.Validate();
+string expectedRuntimeIdentifier = Environment.GetEnvironmentVariable("SUPPROCOM_TEST_RID") ?? "linux-x64";
+if (!FFmpegBinaries.RuntimeIdentifier.Equals(expectedRuntimeIdentifier, StringComparison.Ordinal))
+{
+    throw new InvalidOperationException($"Unexpected payload Runtime Identifier '{FFmpegBinaries.RuntimeIdentifier}'.");
+}
+
 Xabe.FFmpeg.FFmpeg.SetExecutablesPath(FFmpegBinaries.Directory);
 string input = Path.Combine(Path.GetTempPath(), $"supprocom-xabe-{Guid.NewGuid():N}.mkv");
 try

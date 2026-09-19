@@ -17,6 +17,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         ReleasePlan plan,
         string planHash,
         string planDirectory,
+        string? workerArtifactRoot,
         FlavorDefinition flavor,
         SourceVerificationResult source,
         IReadOnlyList<RuntimeDefinition> runtimes,
@@ -41,6 +42,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             plan,
             planHash,
             planDirectory,
+            workerArtifactRoot,
             flavor,
             source,
             runtimes,
@@ -74,6 +76,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 plan,
                 planHash,
                 planDirectory,
+                workerArtifactRoot,
                 runtime,
                 cancellationToken).ConfigureAwait(false);
             string runtimeCandidate = await PackRuntimeAsync(
@@ -228,6 +231,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         ReleasePlan plan,
         string planHash,
         string planDirectory,
+        string? workerArtifactRoot,
         FlavorDefinition flavor,
         SourceVerificationResult source,
         IReadOnlyList<RuntimeDefinition> runtimes,
@@ -259,7 +263,9 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             cancellationToken).ConfigureAwait(false);
         foreach (RuntimeDefinition runtime in runtimes)
         {
-            string manifest = Path.Combine(planDirectory, "workers", runtime.Rid, "accepted", "worker-manifest.json");
+            string manifest = Path.Combine(
+                ResolveAcceptedWorkerDirectory(planDirectory, workerArtifactRoot, runtime.Rid),
+                "worker-manifest.json");
             if (File.Exists(manifest))
             {
                 File.Copy(manifest, Path.Combine(root, "provenance", "workers", runtime.Rid + ".json"));
@@ -397,19 +403,55 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             """;
     }
 
+    private static string ResolveAcceptedWorkerDirectory(
+        string planDirectory,
+        string? workerArtifactRoot,
+        string runtimeIdentifier)
+    {
+        if (string.IsNullOrWhiteSpace(workerArtifactRoot))
+        {
+            return Path.Combine(planDirectory, "workers", runtimeIdentifier, "accepted");
+        }
+
+        string root = Path.GetFullPath(workerArtifactRoot);
+        string accepted = Path.GetFullPath(Path.Combine(root, runtimeIdentifier));
+        StringComparison comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        string rootPrefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+            Path.DirectorySeparatorChar;
+        if (!(accepted + Path.DirectorySeparatorChar).StartsWith(rootPrefix, comparison))
+        {
+            throw new ReleaseFailureException("UnsafeWorkerArtifactPath", "A worker artifact escaped its configured root.");
+        }
+
+        return accepted;
+    }
+
     private async Task<(WorkerManifest Manifest, string Payload)> ReadAndValidateWorkerAsync(
         ReleasePlan plan,
         string planHash,
         string planDirectory,
+        string? workerArtifactRoot,
         RuntimeDefinition runtime,
         CancellationToken cancellationToken)
     {
-        string accepted = Path.Combine(planDirectory, "workers", runtime.Rid, "accepted");
+        string accepted = ResolveAcceptedWorkerDirectory(planDirectory, workerArtifactRoot, runtime.Rid);
         string manifestPath = Path.Combine(accepted, "worker-manifest.json");
+        string manifestHashPath = Path.Combine(accepted, "worker-manifest.sha256");
         string payload = Path.Combine(accepted, "payload");
-        if (!File.Exists(manifestPath) || !Directory.Exists(payload))
+        if (!File.Exists(manifestPath) || !File.Exists(manifestHashPath) || !Directory.Exists(payload))
         {
             throw new ReleaseFailureException("WorkerArtifactMissing", $"The accepted {runtime.Rid} worker artifact is missing.");
+        }
+
+        string manifestHash = await HashFileAsync(manifestPath, cancellationToken).ConfigureAwait(false);
+        string recordedManifestHash = (await File.ReadAllTextAsync(manifestHashPath, cancellationToken).ConfigureAwait(false))
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault() ?? string.Empty;
+        if (!manifestHash.Equals(recordedManifestHash, StringComparison.Ordinal))
+        {
+            throw new ReleaseFailureException("WorkerManifestHashMismatch", $"The {runtime.Rid} worker manifest changed after acceptance.");
         }
 
         WorkerManifest manifest = JsonSerializer.Deserialize(
@@ -420,7 +462,9 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             !manifest.Version.Equals(plan.Version, StringComparison.Ordinal) ||
             !manifest.SourceCommit.Equals(plan.SourceCommit, StringComparison.Ordinal) ||
             !manifest.ArchiveSha256.Equals(plan.ArchiveSha256, StringComparison.Ordinal) ||
+            !manifest.Flavor.Equals(plan.Flavor, StringComparison.Ordinal) ||
             !manifest.RuntimeIdentifier.Equals(runtime.Rid, StringComparison.Ordinal) ||
+            !manifest.Worker.Equals(runtime.Worker, StringComparison.Ordinal) ||
             !manifest.Reproducible ||
             !manifest.SmokeTestPassed)
         {
@@ -436,11 +480,33 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 throw new ReleaseFailureException("WorkerPayloadInvalid", $"The {runtime.Rid} worker payload is missing '{expected.Path}'.");
             }
 
+            if (!expected.Mode.Equals("windows", StringComparison.Ordinal))
+            {
+                if (expected.Mode is not ("0644" or "0755"))
+                {
+                    throw new ReleaseFailureException("WorkerPayloadModeInvalid", $"The {runtime.Rid} payload file '{expected.Path}' has an unsafe recorded mode.");
+                }
+
+                if (!OperatingSystem.IsWindows() && !string.IsNullOrWhiteSpace(workerArtifactRoot))
+                {
+                    File.SetUnixFileMode(path, (UnixFileMode)Convert.ToInt32(expected.Mode, 8));
+                }
+            }
+
             var info = new FileInfo(path);
             string hash = await HashFileAsync(path, cancellationToken).ConfigureAwait(false);
             if (info.Length != expected.Size || !hash.Equals(expected.Sha256, StringComparison.Ordinal))
             {
                 throw new ReleaseFailureException("WorkerPayloadHashMismatch", $"The {runtime.Rid} payload file '{expected.Path}' changed after acceptance.");
+            }
+
+            if (!OperatingSystem.IsWindows() && !expected.Mode.Equals("windows", StringComparison.Ordinal))
+            {
+                string actualMode = Convert.ToString((int)File.GetUnixFileMode(path), 8).PadLeft(4, '0');
+                if (!actualMode.Equals(expected.Mode, StringComparison.Ordinal))
+                {
+                    throw new ReleaseFailureException("WorkerPayloadModeMismatch", $"The {runtime.Rid} payload file '{expected.Path}' changed mode after acceptance.");
+                }
             }
         }
 
