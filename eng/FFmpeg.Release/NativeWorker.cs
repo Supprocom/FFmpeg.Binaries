@@ -22,10 +22,6 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         @"\.so\.\d+$",
         RegexOptions.CultureInvariant,
         TimeSpan.FromSeconds(1));
-    private static readonly Regex MacSonamePattern = new(
-        @"\.\d+\.dylib$",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromSeconds(1));
     private const string FixedPrefix = "/opt/supprocom/ffmpeg";
 
     public async Task<string> BuildAsync(
@@ -414,10 +410,10 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         Regex? sonamePattern = runtime.Os switch
         {
             "linux" or "linux-musl" => LinuxSonamePattern,
-            "macos" => MacSonamePattern,
+            "macos" => null,
             _ => null
         };
-        if (sonamePattern is null)
+        if (sonamePattern is null && runtime.Os != "macos")
         {
             return;
         }
@@ -429,7 +425,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             .ToArray();
         foreach (IGrouping<string, string> group in libraries.GroupBy(path => LibraryStem(Path.GetFileName(path), runtime.Os)))
         {
-            string? soname = group.SingleOrDefault(path => sonamePattern.IsMatch(Path.GetFileName(path)));
+            string? soname = group.SingleOrDefault(path => runtime.Os == "macos"
+                ? IsMacSoname(Path.GetFileName(path), group.Key)
+                : sonamePattern!.IsMatch(Path.GetFileName(path)));
             if (soname is null)
             {
                 throw new ReleaseFailureException("SharedLibrarySonameMissing", $"Shared library '{group.Key}' has no major-version SONAME file.");
@@ -440,6 +438,20 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 File.Delete(redundant);
             }
         }
+    }
+
+    internal static bool IsMacSoname(string fileName, string libraryStem)
+    {
+        string prefix = libraryStem + ".";
+        const string suffix = ".dylib";
+        if (!fileName.StartsWith(prefix, StringComparison.Ordinal) ||
+            !fileName.EndsWith(suffix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        ReadOnlySpan<char> version = fileName.AsSpan(prefix.Length, fileName.Length - prefix.Length - suffix.Length);
+        return int.TryParse(version, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out _);
     }
 
     private static string LibraryStem(string fileName, string operatingSystem)

@@ -176,7 +176,7 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
     {
         CommandResult result = await processRunner.RunAsync(
             "git",
-            ["ls-remote", officialSource, $"refs/tags/{version.Tag}", $"refs/tags/{version.Tag}^{{}}"],
+            ["ls-remote", officialSource, $"refs/tags/{version.Tag}*"],
             workingDirectory,
             GitTimeout,
             cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -186,12 +186,17 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
             .Select(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
             .Where(parts => parts.Length == 2)
             .ToDictionary(parts => parts[1], parts => parts[0], StringComparer.Ordinal);
-        if (!references.TryGetValue($"refs/tags/{version.Tag}", out string? tagObject) ||
-            !references.TryGetValue($"refs/tags/{version.Tag}^{{}}", out string? sourceCommit) ||
+        references.TryGetValue($"refs/tags/{version.Tag}", out string? tagObject);
+        references.TryGetValue($"refs/tags/{version.Tag}^{{}}", out string? sourceCommit);
+        if (tagObject is null ||
+            sourceCommit is null ||
             !tagObject.Equals(version.TagObject, StringComparison.OrdinalIgnoreCase) ||
             !sourceCommit.Equals(version.SourceCommit, StringComparison.OrdinalIgnoreCase))
         {
-            throw new ReleaseFailureException("OfficialTagMismatch", "The official FFmpeg tag reference does not match the approved source identity.");
+            throw new ReleaseFailureException(
+                "OfficialTagMismatch",
+                $"The official FFmpeg tag reference does not match the approved source identity " +
+                $"(tag object: {tagObject ?? "missing"}; source commit: {sourceCommit ?? "missing"}).");
         }
     }
 

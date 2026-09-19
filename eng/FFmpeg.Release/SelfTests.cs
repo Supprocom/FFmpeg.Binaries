@@ -32,7 +32,9 @@ internal static class SelfTests
         Require(
             unsignedIdentity != PackagePublisher.ComputePackageContentIdentity(changed),
             "package content identity detects changed payload bytes");
-        Console.WriteLine("Self-tests passed: 7/7");
+        Require(NativeWorker.IsMacSoname("libavcodec.63.dylib", "libavcodec"), "macOS major-version SONAME detection");
+        Require(!NativeWorker.IsMacSoname("libavcodec.63.1.100.dylib", "libavcodec"), "macOS full-version alias rejection");
+        Console.WriteLine("Self-tests passed: 9/9");
     }
 
     private static void Require(bool condition, string label)
