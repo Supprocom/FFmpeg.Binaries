@@ -207,10 +207,10 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         string payloadRoot = Path.Combine(resultRoot, "payload");
         CopyTree(installedBin, payloadRoot);
         AddComplianceFiles(repositoryRoot, sourceRoot, payloadRoot, version, flavor, runtime, configureArguments);
-        NormalizePayloadPermissions(payloadRoot);
         ValidateExpectedPayload(payloadRoot, runtime);
         string architectureEvidence = await InspectArchitectureAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         string dependencyEvidence = await InspectDynamicDependenciesAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
+        NormalizePayloadPermissions(payloadRoot);
         RejectAbsoluteBuildPath(payloadRoot, workRoot);
         await RunSmokeTestAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         return new BuildOutcome(payloadRoot, configureArguments, architectureEvidence, dependencyEvidence);
