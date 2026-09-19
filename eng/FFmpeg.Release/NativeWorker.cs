@@ -662,9 +662,11 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             TimeSpan.FromSeconds(60),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         EnsureSuccess(result, "DynamicDependencyInspectionFailed");
-        string evidence = CanonicalizeDependencyEvidence(
-            (result.StandardOutput + result.StandardError).Trim(),
-            payloadRoot);
+        string evidence = runtime.Os == "windows"
+            ? CanonicalizeWindowsDependencyEvidence(result.StandardOutput + result.StandardError)
+            : CanonicalizeDependencyEvidence(
+                (result.StandardOutput + result.StandardError).Trim(),
+                payloadRoot);
         await File.WriteAllTextAsync(
             Path.Combine(payloadRoot, "BUILD-METADATA", "dynamic-dependencies.txt"),
             evidence + "\n",
@@ -679,6 +681,26 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             .Replace(payloadRoot, "$PAYLOAD", StringComparison.Ordinal)
             .Replace(payloadRoot.Replace('\\', '/'), "$PAYLOAD", StringComparison.Ordinal);
         return LoadAddressPattern.Replace(canonical, "(address)");
+    }
+
+    internal static string CanonicalizeWindowsDependencyEvidence(string evidence)
+    {
+        string[] dependencies = evidence
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(line => line.StartsWith("DLL Name:", StringComparison.OrdinalIgnoreCase))
+            .Select(line => line["DLL Name:".Length..].Trim())
+            .Where(name => name.Length != 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (dependencies.Length == 0)
+        {
+            throw new ReleaseFailureException(
+                "DynamicDependencyInspectionInvalid",
+                "The Windows dependency inspection reported no imported DLLs.");
+        }
+
+        return string.Join('\n', dependencies.Select(name => $"DLL Name: {name}"));
     }
 
     private async Task RunSmokeTestAsync(
@@ -779,7 +801,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         {
             if (first[index] != second[index])
             {
-                return $"'{first[index].Path}' does not match '{second[index].Path}'";
+                return $"'{first[index].Path}' differs: " +
+                    $"first length {first[index].Size}, SHA-256 {first[index].Sha256}; " +
+                    $"second length {second[index].Size}, SHA-256 {second[index].Sha256}";
             }
         }
 

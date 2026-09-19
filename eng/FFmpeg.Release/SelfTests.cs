@@ -35,7 +35,15 @@ internal static class SelfTests
         Require(NativeWorker.IsMacSoname("libavcodec.63.dylib", "libavcodec"), "macOS major-version SONAME detection");
         Require(!NativeWorker.IsMacSoname("libavcodec.63.1.100.dylib", "libavcodec"), "macOS full-version alias rejection");
         Require(!NativeWorker.IsMacSoname("libavcodec.dylib", "libavcodec"), "macOS unversioned alias rejection");
-        Console.WriteLine("Self-tests passed: 10/10");
+        string windowsDependencies = NativeWorker.CanonicalizeWindowsDependencyEvidence(
+            "first-build/ffmpeg.exe: file format pei-x86-64\n" +
+            "  DLL Name: KERNEL32.dll\n" +
+            "  DLL Name: avcodec-63.dll\n" +
+            "  DLL Name: kernel32.DLL\n");
+        Require(
+            windowsDependencies == "DLL Name: avcodec-63.dll\nDLL Name: KERNEL32.dll",
+            "canonical Windows dependency evidence");
+        Console.WriteLine("Self-tests passed: 11/11");
     }
 
     private static void Require(bool condition, string label)
