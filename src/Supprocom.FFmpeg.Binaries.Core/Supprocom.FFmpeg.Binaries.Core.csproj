@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <PackageId>Supprocom.FFmpeg.Binaries.Core</PackageId>
+    <Version Condition="'$(Version)' == ''">9.0.2</Version>
+    <Authors>Supprocom</Authors>
+    <Company>Supprocom</Company>
+    <Description>Common MSBuild deployment behavior and path discovery for Supprocom FFmpeg binary packages.</Description>
+    <PackageLicenseExpression>LGPL-2.1-or-later</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/Supprocom/FFmpeg.Binaries</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Supprocom/FFmpeg.Binaries.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <IsPackable>true</IsPackable>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../COPYING.LGPLv2.1" Pack="true" PackagePath="licenses/" />
+    <None Include="../../packaging/README.md" Pack="true" PackagePath="/" />
+    <None Include="buildTransitive/Supprocom.FFmpeg.Binaries.Core.props" Pack="true" PackagePath="buildTransitive/" />
+    <None Include="buildTransitive/Supprocom.FFmpeg.Binaries.Core.targets" Pack="true" PackagePath="buildTransitive/" />
+  </ItemGroup>
+</Project>

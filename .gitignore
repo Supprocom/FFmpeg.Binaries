@@ -50,9 +50,16 @@
 /coverage.info
 /lcov/
 /src
+!/src/
 /mapfile
 /tools/python/__pycache__/
 /libavcodec/vulkan/*.c
 /libavfilter/vulkan/*.c
 /.*/
 !/.forgejo/
+!/.github/
+/artifacts/
+/bin/
+/obj/
+**/bin/
+**/obj/

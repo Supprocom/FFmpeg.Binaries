@@ -1,0 +1,7 @@
+<Project>
+  <ItemGroup>
+    <SupprocomFFmpegAvailablePayload Include="$(MSBuildThisFileDirectory)..\runtimes\@RID@\native\ffmpeg\**\*">
+      <RuntimeIdentifier>@RID@</RuntimeIdentifier>
+    </SupprocomFFmpegAvailablePayload>
+  </ItemGroup>
+</Project>

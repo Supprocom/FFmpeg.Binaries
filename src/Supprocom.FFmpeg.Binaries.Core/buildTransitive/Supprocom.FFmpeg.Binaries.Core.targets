@@ -1,0 +1,41 @@
+<Project>
+  <Target Name="SupprocomFFmpegSelectPayload"
+          BeforeTargets="SupprocomFFmpegValidateSelection"
+          Condition="'$(SupprocomFFmpegCopyToOutput)' == 'true'">
+    <ItemGroup>
+      <SupprocomFFmpegPayload Include="@(SupprocomFFmpegAvailablePayload)"
+                              Condition="'%(SupprocomFFmpegAvailablePayload.RuntimeIdentifier)' == '$(SupprocomFFmpegRuntimeIdentifier)'" />
+    </ItemGroup>
+  </Target>
+
+  <Target Name="SupprocomFFmpegValidateSelection"
+          BeforeTargets="SupprocomFFmpegCopyPayload"
+          Condition="'$(SupprocomFFmpegCopyToOutput)' == 'true'">
+    <Error Condition="'$(SupprocomFFmpegRuntimeIdentifier)' == ''"
+           Text="Supprocom FFmpeg could not determine a Runtime Identifier. Set RuntimeIdentifier or SupprocomFFmpegRuntimeIdentifier." />
+    <Error Condition="'@(SupprocomFFmpegPayload)' == ''"
+           Text="No Supprocom FFmpeg payload is available for Runtime Identifier '$(SupprocomFFmpegRuntimeIdentifier)'." />
+  </Target>
+
+  <Target Name="SupprocomFFmpegCopyPayload"
+          AfterTargets="CopyFilesToOutputDirectory"
+          Condition="'$(SupprocomFFmpegCopyToOutput)' == 'true'"
+          Inputs="@(SupprocomFFmpegPayload)"
+          Outputs="@(SupprocomFFmpegPayload->'$(TargetDir)$(SupprocomFFmpegOutputDirectory)/%(RecursiveDir)%(Filename)%(Extension)')">
+    <Copy SourceFiles="@(SupprocomFFmpegPayload)"
+          DestinationFiles="@(SupprocomFFmpegPayload->'$(TargetDir)$(SupprocomFFmpegOutputDirectory)/%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="SupprocomFFmpegCopyPublishPayload"
+          AfterTargets="ComputeFilesToPublish"
+          Condition="'$(SupprocomFFmpegCopyToOutput)' == 'true'">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="@(SupprocomFFmpegPayload)">
+        <RelativePath>$(SupprocomFFmpegOutputDirectory)/%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+</Project>
