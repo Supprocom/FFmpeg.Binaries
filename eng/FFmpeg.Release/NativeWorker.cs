@@ -150,7 +150,10 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             ["ZERO_AR_DATE"] = "1"
         };
         AddBuildRuntimeSearchPath(deterministicEnvironment, sourceRoot, runtime);
-        (string configureTool, IReadOnlyList<string> arguments) = ConfigureCommand(sourceRoot, configureArguments);
+        (string configureTool, IReadOnlyList<string> arguments) = await ConfigureCommandAsync(
+            sourceRoot,
+            configureArguments,
+            cancellationToken).ConfigureAwait(false);
         CommandResult configure = await processRunner.RunAsync(
             configureTool,
             arguments,
@@ -271,13 +274,29 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         return arguments;
     }
 
-    private static (string Tool, IReadOnlyList<string> Arguments) ConfigureCommand(
+    private async Task<(string Tool, IReadOnlyList<string> Arguments)> ConfigureCommandAsync(
         string sourceRoot,
-        IReadOnlyList<string> configureArguments)
+        IReadOnlyList<string> configureArguments,
+        CancellationToken cancellationToken)
     {
         if (OperatingSystem.IsWindows())
         {
-            return ("bash", ["./configure", .. configureArguments]);
+            CommandResult shellPath = await processRunner.RunAsync(
+                "cygpath",
+                ["-w", "/usr/bin/bash"],
+                sourceRoot,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(shellPath, "WorkerShellResolutionFailed");
+            string bash = shellPath.StandardOutput.Trim();
+            if (!File.Exists(bash))
+            {
+                throw new ReleaseFailureException(
+                    "WorkerShellResolutionFailed",
+                    "The MSYS2 Bash executable could not be resolved to a Windows path.");
+            }
+
+            return (bash, ["./configure", .. configureArguments]);
         }
 
         return (Path.Combine(sourceRoot, "configure"), configureArguments);
@@ -450,7 +469,13 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             return false;
         }
 
-        ReadOnlySpan<char> version = fileName.AsSpan(prefix.Length, fileName.Length - prefix.Length - suffix.Length);
+        int versionLength = fileName.Length - prefix.Length - suffix.Length;
+        if (versionLength <= 0)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<char> version = fileName.AsSpan(prefix.Length, versionLength);
         return int.TryParse(version, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out _);
     }
 

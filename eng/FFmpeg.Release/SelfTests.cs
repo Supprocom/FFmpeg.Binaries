@@ -34,7 +34,8 @@ internal static class SelfTests
             "package content identity detects changed payload bytes");
         Require(NativeWorker.IsMacSoname("libavcodec.63.dylib", "libavcodec"), "macOS major-version SONAME detection");
         Require(!NativeWorker.IsMacSoname("libavcodec.63.1.100.dylib", "libavcodec"), "macOS full-version alias rejection");
-        Console.WriteLine("Self-tests passed: 9/9");
+        Require(!NativeWorker.IsMacSoname("libavcodec.dylib", "libavcodec"), "macOS unversioned alias rejection");
+        Console.WriteLine("Self-tests passed: 10/10");
     }
 
     private static void Require(bool condition, string label)
