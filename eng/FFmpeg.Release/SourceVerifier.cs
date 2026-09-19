@@ -42,7 +42,7 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
         var gpgEnvironment = new Dictionary<string, string?> { ["GNUPGHOME"] = gpgHome };
         CommandResult inspectKey = await processRunner.RunAsync(
             "gpg",
-            ["--batch", "--with-colons", "--import-options", "show-only", "--import", keyPath],
+            ["--batch", "--no-autostart", "--with-colons", "--import-options", "show-only", "--import", keyPath],
             planDirectory,
             GpgTimeout,
             gpgEnvironment,
@@ -56,7 +56,7 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
 
         CommandResult importKey = await processRunner.RunAsync(
             "gpg",
-            ["--batch", "--import", keyPath],
+            ["--batch", "--no-autostart", "--import", keyPath],
             planDirectory,
             GpgTimeout,
             gpgEnvironment,
@@ -65,7 +65,7 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
 
         CommandResult verify = await processRunner.RunAsync(
             "gpg",
-            ["--batch", "--status-fd=1", "--verify", signaturePath, archivePath],
+            ["--batch", "--no-autostart", "--status-fd=1", "--verify", signaturePath, archivePath],
             planDirectory,
             GpgTimeout,
             gpgEnvironment,
@@ -111,16 +111,19 @@ internal sealed class SourceVerifier(HttpClient httpClient, ProcessRunner proces
                 HttpCompletionOption.ResponseHeadersRead,
                 linked.Token).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
-            await using Stream source = await response.Content.ReadAsStreamAsync(linked.Token).ConfigureAwait(false);
-            await using var target = new FileStream(
-                temporaryPath,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                131072,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
-            await source.CopyToAsync(target, linked.Token).ConfigureAwait(false);
-            await target.FlushAsync(linked.Token).ConfigureAwait(false);
+            await using (Stream source = await response.Content.ReadAsStreamAsync(linked.Token).ConfigureAwait(false))
+            await using (var target = new FileStream(
+                             temporaryPath,
+                             FileMode.Create,
+                             FileAccess.Write,
+                             FileShare.None,
+                             131072,
+                             FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                await source.CopyToAsync(target, linked.Token).ConfigureAwait(false);
+                await target.FlushAsync(linked.Token).ConfigureAwait(false);
+            }
+
             File.Move(temporaryPath, destination, overwrite: false);
         }
         catch (OperationCanceledException) when (timeout.IsCancellationRequested)
