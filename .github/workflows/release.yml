@@ -1,6 +1,9 @@
 name: FFmpeg release
 
 on:
+  push:
+    branches:
+      - codex/ffmpeg-release-system
   workflow_dispatch:
     inputs:
       version:
@@ -13,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ffmpeg-release-${{ inputs.version }}
+  group: ffmpeg-release-${{ inputs.version || '9.0.2' }}
   cancel-in-progress: false
 
 env:
@@ -74,7 +77,7 @@ jobs:
       - name: Produce independently reproduced native payload
         run: >-
           dotnet run --project FFmpeg.Release.csproj --configuration Release --
-          --worker --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
+          --worker --version "${{ inputs.version || '9.0.2' }}" --rid "${{ matrix.rid }}"
           --release-root "${RUNNER_TEMP}/release"
           --worker-output-root "${RUNNER_TEMP}/worker-artifacts"
 
@@ -109,7 +112,7 @@ jobs:
       - name: Produce independently reproduced musl payload
         env:
           RELEASE_RID: ${{ matrix.rid }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ inputs.version || '9.0.2' }}
           SDK_IMAGE: mcr.microsoft.com/dotnet/sdk@sha256:3f9c03432d664163a90d20e3ed0a3784d0aa82c1b9cbd1a7dd4609fede95669e
         run: |
           docker run --rm \
@@ -167,7 +170,7 @@ jobs:
       - name: Produce independently reproduced native payload
         run: >-
           dotnet run --project FFmpeg.Release.csproj --configuration Release --
-          --worker --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
+          --worker --version "${{ inputs.version || '9.0.2' }}" --rid "${{ matrix.rid }}"
           --release-root "${RUNNER_TEMP}/release"
           --worker-output-root "${RUNNER_TEMP}/worker-artifacts"
 
@@ -238,7 +241,7 @@ jobs:
         shell: msys2 {0}
         run: |
           dotnet run --project FFmpeg.Release.csproj --configuration Release -- \
-            --worker --version "${{ inputs.version }}" --rid "${{ matrix.rid }}" \
+            --worker --version "${{ inputs.version || '9.0.2' }}" --rid "${{ matrix.rid }}" \
             --release-root "${RUNNER_TEMP}/release" \
             --worker-output-root "${RUNNER_TEMP}/worker-artifacts"
 
@@ -281,7 +284,7 @@ jobs:
       - name: Assemble and freeze exact package bytes
         run: >-
           dotnet run --project FFmpeg.Release.csproj --configuration Release --
-          --assemble --version "${{ inputs.version }}"
+          --assemble --version "${{ inputs.version || '9.0.2' }}"
           --release-root "${RUNNER_TEMP}/release"
           --worker-artifact-root "${RUNNER_TEMP}/worker-artifacts"
           --package-output-root "${RUNNER_TEMP}/package-artifacts"
@@ -289,7 +292,7 @@ jobs:
       - name: Upload frozen package family
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: frozen-packages-${{ inputs.version }}
+          name: frozen-packages-${{ inputs.version || '9.0.2' }}
           path: ${{ runner.temp }}/package-artifacts
           if-no-files-found: error
           compression-level: 0
@@ -332,14 +335,14 @@ jobs:
       - name: Download frozen package family
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: frozen-packages-${{ inputs.version }}
+          name: frozen-packages-${{ inputs.version || '9.0.2' }}
           path: ${{ runner.temp }}/packages
 
       - name: Run Unix consumer gate
         if: runner.os != 'Windows'
         run: >-
           dotnet run --project FFmpeg.Release.csproj --configuration Release --
-          --consumer-gate --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
+          --consumer-gate --version "${{ inputs.version || '9.0.2' }}" --rid "${{ matrix.rid }}"
           --package-root "${RUNNER_TEMP}/packages"
           --test-root "${RUNNER_TEMP}/consumer-gates"
           --consumer-output-root "${RUNNER_TEMP}/consumer-attestations"
@@ -349,7 +352,7 @@ jobs:
         shell: pwsh
         run: >-
           dotnet run --project FFmpeg.Release.csproj --configuration Release --
-          --consumer-gate --version "${{ inputs.version }}" --rid "${{ matrix.rid }}"
+          --consumer-gate --version "${{ inputs.version || '9.0.2' }}" --rid "${{ matrix.rid }}"
           --package-root "${env:RUNNER_TEMP}/packages"
           --test-root "${env:RUNNER_TEMP}/consumer-gates"
           --consumer-output-root "${env:RUNNER_TEMP}/consumer-attestations"
@@ -384,13 +387,13 @@ jobs:
       - name: Download frozen package family
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: frozen-packages-${{ inputs.version }}
+          name: frozen-packages-${{ inputs.version || '9.0.2' }}
           path: ${{ runner.temp }}/packages
 
       - name: Run musl consumer gate
         env:
           RELEASE_RID: ${{ matrix.rid }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ inputs.version || '9.0.2' }}
           SDK_IMAGE: mcr.microsoft.com/dotnet/sdk@sha256:3f9c03432d664163a90d20e3ed0a3784d0aa82c1b9cbd1a7dd4609fede95669e
         run: |
           docker run --rm \
@@ -441,7 +444,7 @@ jobs:
       - name: Download frozen package family
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
-          name: frozen-packages-${{ inputs.version }}
+          name: frozen-packages-${{ inputs.version || '9.0.2' }}
           path: ${{ runner.temp }}/packages
 
       - name: Download all target-native consumer attestations
@@ -458,7 +461,7 @@ jobs:
           SUPPROCOM_GITHUB_PACKAGES_USER: ${{ github.actor }}
         run: >-
           dotnet run --project FFmpeg.Release.csproj --configuration Release --
-          --publish --version "${{ inputs.version }}"
+          --publish --version "${{ inputs.version || '9.0.2' }}"
           --package-root "${RUNNER_TEMP}/packages"
           --attestation-root "${RUNNER_TEMP}/consumer-attestations"
 
@@ -466,7 +469,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: publication-evidence-${{ inputs.version }}
+          name: publication-evidence-${{ inputs.version || '9.0.2' }}
           path: |
             ${{ runner.temp }}/packages/release-manifest.json
             ${{ runner.temp }}/packages/release.spdx.json
