@@ -111,6 +111,11 @@ internal static class SelfTests
                 !string.IsNullOrWhiteSpace(runtime.Toolchain.RepositorySnapshot)),
             "complete immutable toolchain matrix");
         Require(
+            ToolchainInspector.ParseApkPackageVersion(
+                ["gnupg-2.4.9-r0", "gnupg-gpgconf-2.4.9-r0"],
+                "gnupg") == "2.4.9-r0",
+            "unambiguous APK package identity parsing");
+        Require(
             NativeWorker.ParseElfDependencies(
                 "0x1 (NEEDED) Shared library: [libm.so.6]\n0x1 (NEEDED) Shared library: [libc.so.6]\n")
                 .SequenceEqual(["libc.so.6", "libm.so.6"], StringComparer.Ordinal),
@@ -138,7 +143,7 @@ internal static class SelfTests
         Require(
             NativeWorker.ReadOsReleaseValue("ID=ubuntu\nVERSION_ID=\"24.04\"\n", "VERSION_ID") == "24.04",
             "OS release parsing");
-        Console.WriteLine("Self-tests passed: 30/30");
+        Console.WriteLine("Self-tests passed: 31/31");
     }
 
     private static void Require(bool condition, string label)

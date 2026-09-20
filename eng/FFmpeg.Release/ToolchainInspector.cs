@@ -94,23 +94,28 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
             ["info", "-v"],
             workingDirectory,
             cancellationToken).ConfigureAwait(false);
+        string[] inventory = SplitLines(inventoryOutput);
         var packages = new SortedDictionary<string, string>(StringComparer.Ordinal);
         foreach (string package in runtime.Toolchain.Packages.Keys)
         {
-            string output = await RunRequiredAsync(
-                "apk",
-                ["info", "-v", package],
-                workingDirectory,
-                cancellationToken).ConfigureAwait(false);
-            string prefix = package + "-";
-            string? identity = SplitLines(output).SingleOrDefault(line => line.StartsWith(prefix, StringComparison.Ordinal));
-            if (identity is not null)
+            string? version = ParseApkPackageVersion(inventory, package);
+            if (version is not null)
             {
-                packages[package] = identity[prefix.Length..];
+                packages[package] = version;
             }
         }
 
-        return (packages, SplitLines(inventoryOutput).Order(StringComparer.Ordinal).ToArray());
+        return (packages, inventory.Order(StringComparer.Ordinal).ToArray());
+    }
+
+    internal static string? ParseApkPackageVersion(IEnumerable<string> inventory, string package)
+    {
+        string prefix = package + "-";
+        string? identity = inventory.SingleOrDefault(line =>
+            line.StartsWith(prefix, StringComparison.Ordinal) &&
+            line.Length > prefix.Length &&
+            char.IsAsciiDigit(line[prefix.Length]));
+        return identity?[prefix.Length..];
     }
 
     private async Task<(IReadOnlyDictionary<string, string> Packages, IReadOnlyList<string> Inventory)>
