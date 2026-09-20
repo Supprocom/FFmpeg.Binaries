@@ -75,6 +75,10 @@ internal static class SelfTests
             linux.Libc == "glibc" &&
             linux.MinimumLibcVersion == "2.39",
             "glibc compatibility boundary");
+        RuntimeDefinition linuxArm64 = matrix.RuntimeIdentifiers.Single(item => item.Rid == "linux-arm64");
+        Require(
+            linuxArm64.SystemDependencies?.Contains("ld-linux-aarch64.so.1", StringComparer.Ordinal) == true,
+            "AArch64 glibc loader allowlist");
         RuntimeDefinition musl = matrix.RuntimeIdentifiers.Single(item => item.Rid == "linux-musl-arm64");
         Require(
             musl.MinimumOsVersion == "3.23" &&
@@ -114,7 +118,7 @@ internal static class SelfTests
         Require(
             NativeWorker.ReadOsReleaseValue("ID=ubuntu\nVERSION_ID=\"24.04\"\n", "VERSION_ID") == "24.04",
             "OS release parsing");
-        Console.WriteLine("Self-tests passed: 25/25");
+        Console.WriteLine("Self-tests passed: 26/26");
     }
 
     private static void Require(bool condition, string label)

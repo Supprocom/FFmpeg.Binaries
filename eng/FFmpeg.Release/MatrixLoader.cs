@@ -168,13 +168,16 @@ internal static class MatrixLoader
 
                     break;
                 case "linux":
+                    IReadOnlyList<string> approvedGlibcDependencies = runtime.Architecture == "arm64"
+                        ? ["ld-linux-aarch64.so.1", .. glibcDependencies]
+                        : glibcDependencies;
                     RequireRuntimePolicy(
                         runtime,
                         "24.04",
                         "glibc",
                         "2.39",
                         workerImage: null,
-                        glibcDependencies);
+                        approvedGlibcDependencies);
                     break;
                 case "linux-musl":
                     string muslDependency = runtime.Architecture switch

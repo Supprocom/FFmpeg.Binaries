@@ -64,7 +64,7 @@
       "minimumOsVersion": "24.04",
       "libc": "glibc",
       "minimumLibcVersion": "2.39",
-      "systemDependencies": ["libc.so.6", "libdl.so.2", "libm.so.6", "libpthread.so.0", "librt.so.1"]
+      "systemDependencies": ["ld-linux-aarch64.so.1", "libc.so.6", "libdl.so.2", "libm.so.6", "libpthread.so.0", "librt.so.1"]
     },
     {
       "rid": "linux-musl-x64",
