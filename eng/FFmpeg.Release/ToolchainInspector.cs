@@ -252,7 +252,7 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
                 ("compiler", "clang", ["--version"]),
                 ("assembler", "llvm-mc", ["--version"]),
                 ("archiver", "llvm-ar", ["--version"]),
-                ("linker", "ld.lld", ["--version"]),
+                ("linker", "lld-link", ["--version"]),
                 ("strip", "llvm-strip", ["--version"]),
                 ("make", "make", ["--version"]),
                 ("file", "file", ["--version"])
