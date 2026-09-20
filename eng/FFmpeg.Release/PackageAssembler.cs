@@ -318,6 +318,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         Directory.CreateDirectory(Path.Combine(root, "build"));
         Directory.CreateDirectory(Path.Combine(root, "licenses"));
         Directory.CreateDirectory(Path.Combine(root, "provenance", "workers"));
+        Directory.CreateDirectory(Path.Combine(root, "provenance", "toolchains"));
         Directory.CreateDirectory(Path.Combine(root, "patches"));
         File.Copy(source.ArchivePath, Path.Combine(root, "source", Path.GetFileName(source.ArchivePath)));
         File.Copy(source.SignaturePath, Path.Combine(root, "source", Path.GetFileName(source.SignaturePath)));
@@ -338,13 +339,22 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             cancellationToken).ConfigureAwait(false);
         foreach (RuntimeDefinition runtime in runtimes)
         {
-            string manifest = Path.Combine(
-                ResolveAcceptedWorkerDirectory(planDirectory, workerArtifactRoot, runtime.Rid),
-                "worker-manifest.json");
-            if (File.Exists(manifest))
+            string accepted = ResolveAcceptedWorkerDirectory(planDirectory, workerArtifactRoot, runtime.Rid);
+            string manifest = Path.Combine(accepted, "worker-manifest.json");
+            string toolchain = Path.Combine(
+                accepted,
+                "payload",
+                "BUILD-METADATA",
+                "toolchain-provenance.json");
+            if (!File.Exists(manifest) || !File.Exists(toolchain))
             {
-                File.Copy(manifest, Path.Combine(root, "provenance", "workers", runtime.Rid + ".json"));
+                throw new ReleaseFailureException(
+                    "SourceProvenanceIncomplete",
+                    $"The {runtime.Rid} source provenance is missing its worker manifest or toolchain inventory.");
             }
+
+            File.Copy(manifest, Path.Combine(root, "provenance", "workers", runtime.Rid + ".json"));
+            File.Copy(toolchain, Path.Combine(root, "provenance", "toolchains", runtime.Rid + ".json"));
         }
 
         string archiveRoot = $"ffmpeg-{plan.Version}";
@@ -557,7 +567,10 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             await File.ReadAllBytesAsync(manifestPath, cancellationToken).ConfigureAwait(false),
             ReleaseJsonContext.Default.WorkerManifest)
             ?? throw new ReleaseFailureException("WorkerManifestInvalid", $"The {runtime.Rid} worker manifest is empty.");
-        if (manifest.SchemaVersion != 2 ||
+        WorkerFile? toolchainFile = manifest.Files.SingleOrDefault(file => file.Path.Equals(
+            "BUILD-METADATA/toolchain-provenance.json",
+            StringComparison.Ordinal));
+        if (manifest.SchemaVersion != 3 ||
             !manifest.PlanSha256.Equals(planHash, StringComparison.Ordinal) ||
             !manifest.Version.Equals(plan.Version, StringComparison.Ordinal) ||
             !manifest.SourceCommit.Equals(plan.SourceCommit, StringComparison.Ordinal) ||
@@ -565,6 +578,9 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             !manifest.Flavor.Equals(plan.Flavor, StringComparison.Ordinal) ||
             !manifest.RuntimeIdentifier.Equals(runtime.Rid, StringComparison.Ordinal) ||
             !manifest.Worker.Equals(runtime.Worker, StringComparison.Ordinal) ||
+            !manifest.CpuBaseline.Equals(runtime.CpuBaseline, StringComparison.Ordinal) ||
+            toolchainFile is null ||
+            !manifest.ToolchainProvenanceSha256.Equals(toolchainFile.Sha256, StringComparison.Ordinal) ||
             string.IsNullOrWhiteSpace(manifest.ArchitectureEvidence) ||
             string.IsNullOrWhiteSpace(manifest.DynamicDependencyEvidence) ||
             string.IsNullOrWhiteSpace(manifest.AbiCompatibilityEvidence) ||

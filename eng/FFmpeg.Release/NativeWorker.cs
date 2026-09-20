@@ -50,6 +50,10 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
     {
         ValidateWorkerHost(runtime);
         await ValidateBuildBaselineAsync(repositoryRoot, runtime, cancellationToken).ConfigureAwait(false);
+        ToolchainProvenance toolchain = await new ToolchainInspector(processRunner).InspectAndValidateAsync(
+            repositoryRoot,
+            runtime,
+            cancellationToken).ConfigureAwait(false);
         string workerRoot = Path.Combine(planDirectory, "workers", runtime.Rid);
         string comparisonRoot = Path.Combine(workerRoot, "independent-builds");
         string workRoot = Path.Combine(workerRoot, "work");
@@ -61,6 +65,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             flavor,
             runtime,
             source,
+            toolchain,
             workRoot,
             Path.Combine(comparisonRoot, "first"),
             cancellationToken).ConfigureAwait(false);
@@ -70,6 +75,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             flavor,
             runtime,
             source,
+            toolchain,
             workRoot,
             Path.Combine(comparisonRoot, "second"),
             cancellationToken).ConfigureAwait(false);
@@ -90,8 +96,11 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         CopyTree(first.PayloadDirectory, acceptedPayload);
         string configureHash = Convert.ToHexStringLower(
             SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', first.ConfigureArguments))));
+        string toolchainHash = firstFiles.Single(file => file.Path.Equals(
+            "BUILD-METADATA/toolchain-provenance.json",
+            StringComparison.Ordinal)).Sha256;
         var manifest = new WorkerManifest(
-            2,
+            3,
             planHash,
             plan.Version,
             plan.SourceCommit,
@@ -99,6 +108,8 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             flavor.Name,
             runtime.Rid,
             runtime.Worker,
+            runtime.CpuBaseline,
+            toolchainHash,
             configureHash,
             first.ConfigureArguments,
             FateTests,
@@ -137,6 +148,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         FlavorDefinition flavor,
         RuntimeDefinition runtime,
         SourceVerificationResult source,
+        ToolchainProvenance toolchain,
         string workRoot,
         string resultRoot,
         CancellationToken cancellationToken)
@@ -230,7 +242,15 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         await BundleWindowsToolchainRuntimeAsync(installedBin, runtime, cancellationToken).ConfigureAwait(false);
         string payloadRoot = Path.Combine(resultRoot, "payload");
         CopyTree(installedBin, payloadRoot);
-        AddComplianceFiles(repositoryRoot, sourceRoot, payloadRoot, version, flavor, runtime, configureArguments);
+        AddComplianceFiles(
+            repositoryRoot,
+            sourceRoot,
+            payloadRoot,
+            version,
+            flavor,
+            runtime,
+            toolchain,
+            configureArguments);
         ValidateExpectedPayload(payloadRoot, runtime);
         string architectureEvidence = await InspectArchitectureAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         string dependencyEvidence = await InspectDynamicDependenciesAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
@@ -250,6 +270,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
     private static List<string> CreateConfigureArguments(FlavorDefinition flavor, RuntimeDefinition runtime)
     {
+        (string configureCpu, string compilerFlags) = CpuTarget(runtime);
         var arguments = new List<string>
         {
             $"--prefix={FixedPrefix}",
@@ -262,7 +283,8 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             "--disable-autodetect",
             "--enable-pic",
             "--enable-network",
-            "--extra-version=Supprocom"
+            "--extra-version=Supprocom",
+            $"--cpu={configureCpu}"
         };
         arguments.AddRange(flavor.ConfigureArguments);
         switch (runtime.Os)
@@ -273,7 +295,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add($"--arch={ToConfigureArchitecture(runtime.Architecture)}");
                 arguments.Add("--enable-pthreads");
                 arguments.Add("--cc=gcc");
-                arguments.Add("--extra-cflags=-fstack-protector-strong");
+                arguments.Add($"--extra-cflags={compilerFlags} -fstack-protector-strong");
                 arguments.Add("--extra-ldflags=-Wl,-z,relro,-z,now");
                 break;
             case "macos":
@@ -282,7 +304,8 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add("--enable-pthreads");
                 arguments.Add("--cc=clang");
                 arguments.Add("--install-name-dir=@rpath");
-                arguments.Add($"--extra-cflags=-mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
+                arguments.Add(
+                    $"--extra-cflags={compilerFlags} -mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
                 arguments.Add($"--extra-ldflags=-Wl,-rpath,@loader_path -mmacosx-version-min={runtime.MinimumOsVersion}");
                 break;
             case "windows":
@@ -302,6 +325,8 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 {
                     arguments.Add("--cc=gcc");
                 }
+
+                arguments.Add($"--extra-cflags={compilerFlags}");
                 break;
             default:
                 throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is not implemented.");
@@ -309,6 +334,18 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
         return arguments;
     }
+
+    private static (string ConfigureCpu, string CompilerFlags) CpuTarget(RuntimeDefinition runtime) =>
+        runtime.CpuBaseline switch
+        {
+            "x86-i686-sse2" => ("i686", "-march=i686 -msse2 -mfpmath=sse"),
+            "x86-64-v1" => ("x86-64", "-march=x86-64 -mtune=generic"),
+            "armv8-a" => ("generic", "-march=armv8-a"),
+            "apple-m1" => ("apple-m1", "-mcpu=apple-m1"),
+            _ => throw new ReleaseFailureException(
+                "UnsupportedCpuBaseline",
+                $"CPU baseline '{runtime.CpuBaseline}' is unsupported for {runtime.Rid}.")
+        };
 
     private async Task<(string Tool, IReadOnlyList<string> Arguments)> ConfigureCommandAsync(
         string sourceRoot,
@@ -679,6 +716,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         VersionDefinition version,
         FlavorDefinition flavor,
         RuntimeDefinition runtime,
+        ToolchainProvenance toolchain,
         IReadOnlyList<string> configureArguments)
     {
         File.WriteAllText(Path.Combine(payloadRoot, ".rid"), runtime.Rid + "\n", new UTF8Encoding(false));
@@ -708,6 +746,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             Path.Combine(metadata, "config.h"),
             sourceRoot);
         File.WriteAllLines(Path.Combine(metadata, "configure-arguments.txt"), configureArguments, new UTF8Encoding(false));
+        File.WriteAllBytes(
+            Path.Combine(metadata, "toolchain-provenance.json"),
+            JsonSerializer.SerializeToUtf8Bytes(toolchain, ReleaseJsonContext.Default.ToolchainProvenance));
         File.WriteAllText(
             Path.Combine(metadata, "source.json"),
             JsonSerializer.Serialize(
@@ -720,9 +761,12 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                     version.ArchiveUri,
                     flavor = flavor.Name,
                     runtimeIdentifier = runtime.Rid,
+                    runtime.CpuBaseline,
                     runtime.MinimumOsVersion,
                     runtime.Libc,
                     runtime.MinimumLibcVersion,
+                    toolchainEnvironment = runtime.Toolchain.EnvironmentIdentity,
+                    toolchainSnapshot = runtime.Toolchain.RepositorySnapshot,
                     buildRepository = "https://github.com/Supprocom/FFmpeg.Binaries"
                 },
                 IndentedJson) + "\n",
@@ -807,15 +851,24 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         RuntimeDefinition runtime,
         CancellationToken cancellationToken)
     {
-        string executable = Path.Combine(payloadRoot, runtime.Os == "windows" ? "ffmpeg.exe" : "ffmpeg");
-        CommandResult result = await processRunner.RunAsync(
-            "file",
-            ["--brief", executable],
-            payloadRoot,
-            TimeSpan.FromSeconds(30),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        EnsureSuccess(result, "ArchitectureInspectionFailed");
-        string evidence = result.StandardOutput.Trim();
+        (string configureCpu, string compilerFlags) = CpuTarget(runtime);
+        string generatedConfiguration = await File.ReadAllTextAsync(
+            Path.Combine(payloadRoot, "BUILD-METADATA", "config.mak"),
+            cancellationToken).ConfigureAwait(false);
+        string configureArguments = await File.ReadAllTextAsync(
+            Path.Combine(payloadRoot, "BUILD-METADATA", "configure-arguments.txt"),
+            cancellationToken).ConfigureAwait(false);
+        if (!generatedConfiguration.Contains("CONFIG_RUNTIME_CPUDETECT=yes", StringComparison.Ordinal) ||
+            !configureArguments.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                .Contains($"--cpu={configureCpu}", StringComparer.Ordinal) ||
+            compilerFlags.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                .Any(flag => !generatedConfiguration.Contains(flag, StringComparison.Ordinal)))
+        {
+            throw new ReleaseFailureException(
+                "CpuBaselineConfigurationMismatch",
+                $"The generated {runtime.Rid} configuration does not enforce CPU baseline '{runtime.CpuBaseline}' with runtime dispatch.");
+        }
+
         string[] expectedTokens = runtime.Architecture switch
         {
             "x86" => ["80386", "i386"],
@@ -823,12 +876,126 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             "arm64" => ["aarch64", "arm64"],
             _ => throw new ReleaseFailureException("UnsupportedArchitecture", $"Architecture '{runtime.Architecture}' is unsupported.")
         };
-        if (!expectedTokens.Any(token => evidence.Contains(token, StringComparison.OrdinalIgnoreCase)))
+        var evidenceLines = new List<string>
         {
-            throw new ReleaseFailureException("ArchitectureMismatch", $"The payload architecture evidence does not match {runtime.Rid}.");
+            $"cpuBaseline: {runtime.CpuBaseline}",
+            $"configureCpu: {configureCpu}",
+            $"compilerFlags: {compilerFlags}",
+            "runtimeCpuDetection: enabled"
+        };
+        foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            CommandResult result = await processRunner.RunAsync(
+                "file",
+                ["--brief", path],
+                payloadRoot,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(result, "ArchitectureInspectionFailed");
+            string evidence = result.StandardOutput.Trim();
+            if (!expectedTokens.Any(token => evidence.Contains(token, StringComparison.OrdinalIgnoreCase)))
+            {
+                throw new ReleaseFailureException(
+                    "ArchitectureMismatch",
+                    $"Native file '{Path.GetFileName(path)}' does not match {runtime.Rid} CPU baseline '{runtime.CpuBaseline}'.");
+            }
+
+            string formatRequirement = await InspectBinaryCpuRequirementAsync(
+                path,
+                payloadRoot,
+                runtime,
+                cancellationToken).ConfigureAwait(false);
+            evidenceLines.Add($"{Path.GetFileName(path)}: {evidence}; {formatRequirement}");
         }
 
-        return evidence;
+        return string.Join('\n', evidenceLines);
+    }
+
+    private async Task<string> InspectBinaryCpuRequirementAsync(
+        string path,
+        string workingDirectory,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        if (runtime.Os == "windows")
+        {
+            CommandResult result = await processRunner.RunAsync(
+                "objdump",
+                ["-f", path],
+                workingDirectory,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(result, "CpuBaselineInspectionFailed");
+            string? architecture = result.StandardOutput
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .SingleOrDefault(line => line.StartsWith("architecture:", StringComparison.Ordinal));
+            if (architecture is null)
+            {
+                throw new ReleaseFailureException(
+                    "CpuBaselineInspectionFailed",
+                    $"PE file '{Path.GetFileName(path)}' did not expose an architecture requirement.");
+            }
+
+            return architecture + "; compiler baseline and zero-optional-CPU smoke gate";
+        }
+
+        if (runtime.Os is "linux" or "linux-musl")
+        {
+            CommandResult result = await processRunner.RunAsync(
+                "readelf",
+                ["-W", "-h", "-n", path],
+                workingDirectory,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(result, "CpuBaselineInspectionFailed");
+            string[] lines = (result.StandardOutput + result.StandardError)
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            string? machine = lines.SingleOrDefault(line => line.StartsWith("Machine:", StringComparison.Ordinal));
+            string[] isaRequirements = lines
+                .Where(line => line.Contains("x86 ISA needed:", StringComparison.Ordinal))
+                .ToArray();
+            if (machine is null ||
+                isaRequirements.Any(line =>
+                    line.Contains("x86-64-v2", StringComparison.Ordinal) ||
+                    line.Contains("x86-64-v3", StringComparison.Ordinal) ||
+                    line.Contains("x86-64-v4", StringComparison.Ordinal)))
+            {
+                throw new ReleaseFailureException(
+                    "CpuBaselineExceeded",
+                    $"ELF file '{Path.GetFileName(path)}' exceeds CPU baseline '{runtime.CpuBaseline}'.");
+            }
+
+            string isa = isaRequirements.Length == 0
+                ? "no higher GNU ISA requirement"
+                : string.Join("; ", isaRequirements);
+            return machine + "; " + isa;
+        }
+
+        if (runtime.Os == "macos")
+        {
+            CommandResult result = await processRunner.RunAsync(
+                "otool",
+                ["-hv", path],
+                workingDirectory,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(result, "CpuBaselineInspectionFailed");
+            string? header = result.StandardOutput
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .LastOrDefault(line =>
+                    line.Contains(runtime.Architecture == "x64" ? "X86_64" : "ARM64", StringComparison.Ordinal));
+            if (header is null || !header.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                    .Contains("ALL", StringComparer.Ordinal))
+            {
+                throw new ReleaseFailureException(
+                    "CpuBaselineExceeded",
+                    $"Mach-O file '{Path.GetFileName(path)}' does not use the baseline CPU subtype.");
+            }
+
+            return "Mach-O CPU subtype ALL; compiler baseline and zero-optional-CPU smoke gate";
+        }
+
+        throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is unsupported.");
     }
 
     private async Task<string> InspectDynamicDependenciesAsync(
@@ -838,18 +1005,39 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
     {
         if (runtime.Os == "windows")
         {
-            var dependencies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> windowsBundledFiles = EnumerateNativeFiles(payloadRoot, runtime)
+                .Select(path => Path.GetFileName(path)!)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> windowsSystemDependencies = (runtime.SystemDependencies ?? [])
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var windowsEvidenceLines = new List<string>();
             foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.OrdinalIgnoreCase))
             {
-                dependencies.UnionWith(await InspectWindowsDependenciesAsync(
+                IReadOnlyList<string> dependencies = await InspectWindowsDependenciesAsync(
                     path,
                     payloadRoot,
-                    cancellationToken).ConfigureAwait(false));
+                    cancellationToken).ConfigureAwait(false);
+                windowsEvidenceLines.Add(Path.GetFileName(path) + ":");
+                foreach (string dependency in dependencies)
+                {
+                    if (windowsBundledFiles.Contains(dependency))
+                    {
+                        windowsEvidenceLines.Add("  bundled: " + dependency);
+                    }
+                    else if (windowsSystemDependencies.Contains(dependency))
+                    {
+                        windowsEvidenceLines.Add("  system: " + dependency);
+                    }
+                    else
+                    {
+                        throw new ReleaseFailureException(
+                            "UndeclaredSystemDependency",
+                            $"Native file '{Path.GetFileName(path)}' imports undeclared Windows system DLL '{dependency}'.");
+                    }
+                }
             }
 
-            string windowsEvidence = string.Join(
-                '\n',
-                dependencies.Order(StringComparer.OrdinalIgnoreCase).Select(name => $"DLL Name: {name}"));
+            string windowsEvidence = string.Join('\n', windowsEvidenceLines);
             await File.WriteAllTextAsync(
                 Path.Combine(payloadRoot, "BUILD-METADATA", "dynamic-dependencies.txt"),
                 windowsEvidence + "\n",
@@ -974,13 +1162,44 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         var evidenceLines = new List<string>
         {
             $"runtimeIdentifier: {runtime.Rid}",
+            $"cpuBaseline: {runtime.CpuBaseline}",
             $"minimumOsVersion: {runtime.MinimumOsVersion ?? "not-versioned"}",
             $"libc: {runtime.Libc ?? "not-applicable"}",
             $"minimumLibcVersion: {runtime.MinimumLibcVersion ?? "not-applicable"}"
         };
         if (runtime.Os == "windows")
         {
-            evidenceLines.Add("enforcement: PE architecture, complete import closure, and hardening gates");
+            Version actualWorker = Environment.OSVersion.Version;
+            string actualWorkerBoundary = $"{actualWorker.Major}.{actualWorker.Minor}.{actualWorker.Build}";
+            evidenceLines.Add("testedWindowsKernel: " + actualWorkerBoundary);
+            int[] floor = ParseDottedVersion(runtime.MinimumOsVersion!);
+            string peMaximum = $"{floor[0]}.{floor[1]}";
+            foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.OrdinalIgnoreCase))
+            {
+                CommandResult result = await processRunner.RunAsync(
+                    "objdump",
+                    ["-p", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(result, "AbiCompatibilityInspectionFailed");
+                (string operatingSystemVersion, string subsystemVersion) = ParseWindowsPeVersions(result.StandardOutput);
+                if (CompareDottedVersions(operatingSystemVersion, peMaximum) > 0 ||
+                    CompareDottedVersions(subsystemVersion, peMaximum) > 0)
+                {
+                    throw new ReleaseFailureException(
+                        "WindowsPeVersionFloorExceeded",
+                        $"PE file '{Path.GetFileName(path)}' requires Windows {operatingSystemVersion}/subsystem " +
+                        $"{subsystemVersion}, above the declared {runtime.MinimumOsVersion} boundary.");
+                }
+
+                evidenceLines.Add(
+                    $"{Path.GetFileName(path)}: PE OS {operatingSystemVersion}, subsystem {subsystemVersion}");
+            }
+
+            evidenceLines.Add(
+                "enforcement: exact worker-kernel floor, per-file PE architecture/version headers, " +
+                "complete import allowlist, explicit compiler CPU target, runtime CPU dispatch, smoke test, and hardening gates");
         }
         else if (runtime.Os == "linux")
         {
@@ -1075,6 +1294,46 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             new UTF8Encoding(false),
             cancellationToken).ConfigureAwait(false);
         return evidence;
+    }
+
+    internal static (string OperatingSystemVersion, string SubsystemVersion) ParseWindowsPeVersions(string evidence)
+    {
+        var values = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (string line in evidence.Split(
+                     ['\r', '\n'],
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string[] fields = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length == 2 &&
+                (fields[0] is "MajorOSystemVersion" or "MinorOSystemVersion" or
+                    "MajorSubsystemVersion" or "MinorSubsystemVersion") &&
+                int.TryParse(
+                    fields[1],
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out int value))
+            {
+                values[fields[0]] = value;
+            }
+        }
+
+        string[] required =
+        [
+            "MajorOSystemVersion",
+            "MinorOSystemVersion",
+            "MajorSubsystemVersion",
+            "MinorSubsystemVersion"
+        ];
+        if (required.Any(field => !values.ContainsKey(field)))
+        {
+            throw new ReleaseFailureException(
+                "WindowsPeVersionInspectionInvalid",
+                "The PE header did not report complete operating-system and subsystem versions.");
+        }
+
+        return (
+            $"{values["MajorOSystemVersion"]}.{values["MinorOSystemVersion"]}",
+            $"{values["MajorSubsystemVersion"]}.{values["MinorSubsystemVersion"]}");
     }
 
     private async Task ValidateElfInterpretersAsync(
@@ -1368,7 +1627,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         CommandResult generate = await processRunner.RunAsync(
             ffmpeg,
             [
-                "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-cpuflags", "0",
                 "-f", "lavfi", "-i", "testsrc2=size=160x120:rate=10",
                 "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
                 "-t", "1", "-c:v", "ffv1", "-c:a", "pcm_s16le", "-y", output
@@ -1380,7 +1639,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         EnsureSuccess(generate, "FFmpegSmokeGenerationFailed");
         CommandResult inspect = await processRunner.RunAsync(
             ffprobe,
-            ["-v", "error", "-show_streams", "-show_format", "-of", "json", output],
+            ["-v", "error", "-cpuflags", "0", "-show_streams", "-show_format", "-of", "json", output],
             payloadRoot,
             SmokeTimeout,
             environment,
@@ -1557,6 +1816,16 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
     {
         if (runtime.Os == "windows")
         {
+            Version actual = Environment.OSVersion.Version;
+            string actualBoundary = $"{actual.Major}.{actual.Minor}.{actual.Build}";
+            if (!actualBoundary.Equals(runtime.MinimumOsVersion, StringComparison.Ordinal))
+            {
+                throw new ReleaseFailureException(
+                    "WorkerOperatingSystemBaselineMismatch",
+                    $"Runtime Identifier '{runtime.Rid}' must be built and smoke-tested on exact Windows kernel " +
+                    $"{runtime.MinimumOsVersion}; this worker is {actualBoundary}.");
+            }
+
             return;
         }
 

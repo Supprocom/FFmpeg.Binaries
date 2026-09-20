@@ -33,11 +33,30 @@ internal sealed record RuntimeDefinition(
     string Os,
     string Architecture,
     string Worker,
+    string CpuBaseline,
+    ToolchainDefinition Toolchain,
     string? MinimumOsVersion = null,
     string? Libc = null,
     string? MinimumLibcVersion = null,
     string? WorkerImage = null,
     IReadOnlyList<string>? SystemDependencies = null);
+
+internal sealed record ToolchainDefinition(
+    string EnvironmentIdentity,
+    string RepositorySnapshot,
+    string PackageManager,
+    IReadOnlyDictionary<string, string> Packages);
+
+internal sealed record ToolchainProvenance(
+    int SchemaVersion,
+    string RuntimeIdentifier,
+    string EnvironmentIdentity,
+    string RepositorySnapshot,
+    string PackageManager,
+    IReadOnlyDictionary<string, string> ApprovedPackages,
+    IReadOnlyList<string> InstalledPackages,
+    IReadOnlyList<string> RepositoryEvidence,
+    IReadOnlyList<string> ToolEvidence);
 
 internal sealed record FlavorDefinition(
     string Name,
@@ -98,6 +117,8 @@ internal sealed record WorkerManifest(
     string Flavor,
     string RuntimeIdentifier,
     string Worker,
+    string CpuBaseline,
+    string ToolchainProvenanceSha256,
     string ConfigureArgumentsSha256,
     IReadOnlyList<string> ConfigureArguments,
     IReadOnlyList<string> FateTests,
@@ -148,6 +169,7 @@ internal sealed record ConsumerAttestation(
 [JsonSerializable(typeof(ReleasePlan))]
 [JsonSerializable(typeof(PersistedPlan))]
 [JsonSerializable(typeof(SourceVerificationResult))]
+[JsonSerializable(typeof(ToolchainProvenance))]
 [JsonSerializable(typeof(WorkerManifest))]
 [JsonSerializable(typeof(List<WorkerFile>))]
 [JsonSerializable(typeof(FrozenReleaseManifest))]

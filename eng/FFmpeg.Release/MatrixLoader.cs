@@ -56,9 +56,9 @@ internal static class MatrixLoader
 
     internal static void Validate(ReleaseMatrix matrix)
     {
-        if (matrix.SchemaVersion != 2)
+        if (matrix.SchemaVersion != 3)
         {
-            throw new ReleaseFailureException("UnsupportedMatrixSchema", "Only release-matrix schema version 2 is supported.");
+            throw new ReleaseFailureException("UnsupportedMatrixSchema", "Only release-matrix schema version 3 is supported.");
         }
 
         string[] actualRids = matrix.RuntimeIdentifiers.Select(item => item.Rid).ToArray();
@@ -144,6 +144,35 @@ internal static class MatrixLoader
 
     private static void ValidateRuntimePolicies(IReadOnlyList<RuntimeDefinition> runtimes)
     {
+        string[] windowsSystemDependencies =
+        [
+            "AVICAP32.dll",
+            "bcrypt.dll",
+            "GDI32.dll",
+            "KERNEL32.dll",
+            "ole32.dll",
+            "OLEAUT32.dll",
+            "SHELL32.dll",
+            "SHLWAPI.dll",
+            "USER32.dll",
+            "WS2_32.dll"
+        ];
+        string[] windowsUcrtDependencies =
+        [
+            "api-ms-win-crt-conio-l1-1-0.dll",
+            "api-ms-win-crt-convert-l1-1-0.dll",
+            "api-ms-win-crt-environment-l1-1-0.dll",
+            "api-ms-win-crt-filesystem-l1-1-0.dll",
+            "api-ms-win-crt-heap-l1-1-0.dll",
+            "api-ms-win-crt-locale-l1-1-0.dll",
+            "api-ms-win-crt-math-l1-1-0.dll",
+            "api-ms-win-crt-private-l1-1-0.dll",
+            "api-ms-win-crt-runtime-l1-1-0.dll",
+            "api-ms-win-crt-stdio-l1-1-0.dll",
+            "api-ms-win-crt-string-l1-1-0.dll",
+            "api-ms-win-crt-time-l1-1-0.dll",
+            "api-ms-win-crt-utility-l1-1-0.dll"
+        ];
         string[] glibcDependencies = ["libc.so.6", "libdl.so.2", "libm.so.6", "libpthread.so.0", "librt.so.1"];
         string[] macDependencies =
         [
@@ -157,15 +186,17 @@ internal static class MatrixLoader
             switch (runtime.Os)
             {
                 case "windows":
-                    if (runtime.MinimumOsVersion is not null ||
-                        runtime.Libc is not null ||
-                        runtime.MinimumLibcVersion is not null ||
-                        runtime.WorkerImage is not null ||
-                        runtime.SystemDependencies is { Count: > 0 })
-                    {
-                        throw InvalidRuntimePolicy(runtime);
-                    }
-
+                    string windowsFloor = runtime.Architecture == "arm64" ? "10.0.26200" : "10.0.26100";
+                    IReadOnlyList<string> windowsDependencies = runtime.Architecture == "x86"
+                        ? [.. windowsSystemDependencies, "msvcrt.dll"]
+                        : [.. windowsUcrtDependencies, .. windowsSystemDependencies];
+                    RequireRuntimePolicy(
+                        runtime,
+                        windowsFloor,
+                        libc: null,
+                        minimumLibcVersion: null,
+                        workerImage: null,
+                        windowsDependencies);
                     break;
                 case "linux":
                     IReadOnlyList<string> approvedGlibcDependencies = runtime.Architecture == "arm64"
@@ -206,6 +237,45 @@ internal static class MatrixLoader
                 default:
                     throw InvalidRuntimePolicy(runtime);
             }
+
+            ValidateCpuAndToolchainPolicy(runtime);
+        }
+    }
+
+    private static void ValidateCpuAndToolchainPolicy(RuntimeDefinition runtime)
+    {
+        string expectedCpuBaseline = runtime.Rid switch
+        {
+            "win-x86" => "x86-i686-sse2",
+            "win-x64" or "linux-x64" or "linux-musl-x64" or "osx-x64" => "x86-64-v1",
+            "osx-arm64" => "apple-m1",
+            "win-arm64" or "linux-arm64" or "linux-musl-arm64" => "armv8-a",
+            _ => string.Empty
+        };
+        ToolchainDefinition? toolchain = runtime.Toolchain;
+        string expectedPackageManager = runtime.Os switch
+        {
+            "windows" => "pacman",
+            "linux" => "apt",
+            "linux-musl" => "apk",
+            "macos" => "homebrew",
+            _ => string.Empty
+        };
+        bool immutableSnapshot = toolchain is not null &&
+            (string.Equals(toolchain.RepositorySnapshot, runtime.WorkerImage, StringComparison.Ordinal) ||
+             (toolchain.RepositorySnapshot?.StartsWith(
+                 "https://github.com/actions/runner-images/commit/",
+                 StringComparison.Ordinal) ?? false));
+        if (!string.Equals(runtime.CpuBaseline, expectedCpuBaseline, StringComparison.Ordinal) ||
+            toolchain is null ||
+            string.IsNullOrWhiteSpace(toolchain.EnvironmentIdentity) ||
+            !immutableSnapshot ||
+            !string.Equals(toolchain.PackageManager, expectedPackageManager, StringComparison.Ordinal) ||
+            toolchain.Packages.Count == 0 ||
+            toolchain.Packages.Any(item =>
+                string.IsNullOrWhiteSpace(item.Key) || string.IsNullOrWhiteSpace(item.Value)))
+        {
+            throw InvalidRuntimePolicy(runtime);
         }
     }
 

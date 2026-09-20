@@ -11,7 +11,7 @@ internal static class SelfTests
     {
         string matrixPath = Path.Combine(repositoryRoot, "eng", "release-matrix.json");
         (ReleaseMatrix matrix, string matrixHash) = MatrixLoader.Load(matrixPath);
-        Require(matrix.SchemaVersion == 2, "compatibility-policy matrix schema");
+        Require(matrix.SchemaVersion == 3, "compatibility-policy matrix schema");
         Require(matrix.RuntimeIdentifiers.Count == 9, "runtime matrix cardinality");
         Require(matrixHash.Length == 64, "matrix hash length");
         Require(
@@ -69,6 +69,17 @@ internal static class SelfTests
             NativeWorker.IsBundledWindowsToolchainRuntime("LIBWINPTHREAD-1.DLL") &&
             !NativeWorker.IsBundledWindowsToolchainRuntime("KERNEL32.dll"),
             "Windows toolchain runtime classification");
+        RuntimeDefinition windows = matrix.RuntimeIdentifiers.Single(item => item.Rid == "win-x64");
+        Require(
+            windows.MinimumOsVersion == "10.0.26100" &&
+            windows.CpuBaseline == "x86-64-v1" &&
+            windows.SystemDependencies?.Contains("KERNEL32.dll", StringComparer.Ordinal) == true,
+            "Windows compatibility boundary");
+        Require(
+            NativeWorker.ParseWindowsPeVersions(
+                "MajorOSystemVersion 10\nMinorOSystemVersion 0\n" +
+                "MajorSubsystemVersion 10\nMinorSubsystemVersion 0\n") == ("10.0", "10.0"),
+            "Windows PE version parsing");
         RuntimeDefinition linux = matrix.RuntimeIdentifiers.Single(item => item.Rid == "linux-x64");
         Require(
             linux.MinimumOsVersion == "24.04" &&
@@ -90,6 +101,15 @@ internal static class SelfTests
             mac.MinimumOsVersion == "15.0" &&
             mac.SystemDependencies?.Contains("/usr/lib/libSystem.B.dylib", StringComparer.Ordinal) == true,
             "macOS compatibility boundary");
+        Require(
+            matrix.RuntimeIdentifiers.All(runtime => !string.IsNullOrWhiteSpace(runtime.CpuBaseline)),
+            "complete CPU baseline matrix");
+        Require(
+            matrix.RuntimeIdentifiers.All(runtime =>
+                runtime.Toolchain.Packages.Count > 0 &&
+                !string.IsNullOrWhiteSpace(runtime.Toolchain.EnvironmentIdentity) &&
+                !string.IsNullOrWhiteSpace(runtime.Toolchain.RepositorySnapshot)),
+            "complete immutable toolchain matrix");
         Require(
             NativeWorker.ParseElfDependencies(
                 "0x1 (NEEDED) Shared library: [libm.so.6]\n0x1 (NEEDED) Shared library: [libc.so.6]\n")
@@ -118,7 +138,7 @@ internal static class SelfTests
         Require(
             NativeWorker.ReadOsReleaseValue("ID=ubuntu\nVERSION_ID=\"24.04\"\n", "VERSION_ID") == "24.04",
             "OS release parsing");
-        Console.WriteLine("Self-tests passed: 26/26");
+        Console.WriteLine("Self-tests passed: 30/30");
     }
 
     private static void Require(bool condition, string label)
