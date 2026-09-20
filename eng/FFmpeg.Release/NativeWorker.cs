@@ -14,12 +14,24 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
     private static readonly TimeSpan SmokeTimeout = TimeSpan.FromMinutes(2);
     private static readonly string[] FateTests = ["fate-ffmpeg-filter_complex", "fate-filter-formats"];
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
-    private static readonly Regex LoadAddressPattern = new(
-        @"\(0x[0-9a-fA-F]+\)",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromSeconds(1));
     private static readonly Regex LinuxSonamePattern = new(
         @"\.so\.\d+$",
+        RegexOptions.CultureInvariant,
+        TimeSpan.FromSeconds(1));
+    private static readonly Regex ElfNeededPattern = new(
+        @"Shared library: \[(?<name>[^\]]+)\]",
+        RegexOptions.CultureInvariant,
+        TimeSpan.FromSeconds(1));
+    private static readonly Regex ElfRunPathPattern = new(
+        @"Library r(?:un)?path: \[(?<path>[^\]]+)\]",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
+        TimeSpan.FromSeconds(1));
+    private static readonly Regex GlibcVersionPattern = new(
+        @"\bGLIBC_(?<version>\d+\.\d+(?:\.\d+)?)\b",
+        RegexOptions.CultureInvariant,
+        TimeSpan.FromSeconds(1));
+    private static readonly Regex MuslVersionPattern = new(
+        @"\bVersion\s+(?<version>\d+\.\d+(?:\.\d+)?)\b",
         RegexOptions.CultureInvariant,
         TimeSpan.FromSeconds(1));
     private const string FixedPrefix = "/opt/supprocom/ffmpeg";
@@ -37,6 +49,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         CancellationToken cancellationToken)
     {
         ValidateWorkerHost(runtime);
+        await ValidateBuildBaselineAsync(repositoryRoot, runtime, cancellationToken).ConfigureAwait(false);
         string workerRoot = Path.Combine(planDirectory, "workers", runtime.Rid);
         string comparisonRoot = Path.Combine(workerRoot, "independent-builds");
         string workRoot = Path.Combine(workerRoot, "work");
@@ -78,7 +91,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         string configureHash = Convert.ToHexStringLower(
             SHA256.HashData(Encoding.UTF8.GetBytes(string.Join('\n', first.ConfigureArguments))));
         var manifest = new WorkerManifest(
-            1,
+            2,
             planHash,
             plan.Version,
             plan.SourceCommit,
@@ -91,6 +104,8 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             FateTests,
             first.ArchitectureEvidence,
             first.DynamicDependencyEvidence,
+            first.AbiCompatibilityEvidence,
+            first.HardeningEvidence,
             true,
             true,
             firstFiles,
@@ -149,6 +164,11 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             ["LANG"] = "C",
             ["ZERO_AR_DATE"] = "1"
         };
+        if (runtime.Os == "macos")
+        {
+            deterministicEnvironment["MACOSX_DEPLOYMENT_TARGET"] = runtime.MinimumOsVersion;
+        }
+
         AddBuildRuntimeSearchPath(deterministicEnvironment, sourceRoot, runtime);
         (string configureTool, IReadOnlyList<string> arguments) = await ConfigureCommandAsync(
             sourceRoot,
@@ -214,10 +234,18 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         ValidateExpectedPayload(payloadRoot, runtime);
         string architectureEvidence = await InspectArchitectureAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         string dependencyEvidence = await InspectDynamicDependenciesAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
+        string abiEvidence = await InspectAbiCompatibilityAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
+        string hardeningEvidence = await InspectHardeningAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         NormalizePayloadPermissions(payloadRoot);
         RejectAbsoluteBuildPath(payloadRoot, workRoot);
         await RunSmokeTestAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
-        return new BuildOutcome(payloadRoot, configureArguments, architectureEvidence, dependencyEvidence);
+        return new BuildOutcome(
+            payloadRoot,
+            configureArguments,
+            architectureEvidence,
+            dependencyEvidence,
+            abiEvidence,
+            hardeningEvidence);
     }
 
     private static List<string> CreateConfigureArguments(FlavorDefinition flavor, RuntimeDefinition runtime)
@@ -245,6 +273,8 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add($"--arch={ToConfigureArchitecture(runtime.Architecture)}");
                 arguments.Add("--enable-pthreads");
                 arguments.Add("--cc=gcc");
+                arguments.Add("--extra-cflags=-fstack-protector-strong");
+                arguments.Add("--extra-ldflags=-Wl,-z,relro,-z,now");
                 break;
             case "macos":
                 arguments.Add("--target-os=darwin");
@@ -252,7 +282,8 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add("--enable-pthreads");
                 arguments.Add("--cc=clang");
                 arguments.Add("--install-name-dir=@rpath");
-                arguments.Add("--extra-ldflags=-Wl,-rpath,@loader_path");
+                arguments.Add($"--extra-cflags=-mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
+                arguments.Add($"--extra-ldflags=-Wl,-rpath,@loader_path -mmacosx-version-min={runtime.MinimumOsVersion}");
                 break;
             case "windows":
                 arguments.Add("--target-os=mingw32");
@@ -689,6 +720,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                     version.ArchiveUri,
                     flavor = flavor.Name,
                     runtimeIdentifier = runtime.Rid,
+                    runtime.MinimumOsVersion,
+                    runtime.Libc,
+                    runtime.MinimumLibcVersion,
                     buildRepository = "https://github.com/Supprocom/FFmpeg.Binaries"
                 },
                 IndentedJson) + "\n",
@@ -824,23 +858,85 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             return windowsEvidence;
         }
 
-        string executable = Path.Combine(payloadRoot, runtime.Os == "windows" ? "ffmpeg.exe" : "ffmpeg");
-        (string tool, string[] arguments) = runtime.Os switch
+        HashSet<string> bundledFiles = EnumerateNativeFiles(payloadRoot, runtime)
+            .Select(path => Path.GetFileName(path)!)
+            .ToHashSet(StringComparer.Ordinal);
+        HashSet<string> allowedSystemDependencies = (runtime.SystemDependencies ?? [])
+            .ToHashSet(StringComparer.Ordinal);
+        var evidenceLines = new List<string>();
+        foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal))
         {
-            "linux" or "linux-musl" => ("ldd", new[] { executable }),
-            "macos" => ("otool", new[] { "-L", executable }),
-            _ => throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is unsupported.")
-        };
-        CommandResult result = await processRunner.RunAsync(
-            tool,
-            arguments,
-            payloadRoot,
-            TimeSpan.FromSeconds(60),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        EnsureSuccess(result, "DynamicDependencyInspectionFailed");
-        string evidence = CanonicalizeDependencyEvidence(
-            (result.StandardOutput + result.StandardError).Trim(),
-            payloadRoot);
+            string[] dependencies;
+            if (runtime.Os is "linux" or "linux-musl")
+            {
+                CommandResult result = await processRunner.RunAsync(
+                    "readelf",
+                    ["-W", "-d", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(result, "DynamicDependencyInspectionFailed");
+                dependencies = ParseElfDependencies(result.StandardOutput);
+                Match runPath = ElfRunPathPattern.Match(result.StandardOutput);
+                if (!runPath.Success || !runPath.Groups["path"].Value.Equals("$ORIGIN", StringComparison.Ordinal))
+                {
+                    throw new ReleaseFailureException(
+                        "RuntimeSearchPathInvalid",
+                        $"Native file '{Path.GetFileName(path)}' does not have the required application-local $ORIGIN runpath.");
+                }
+            }
+            else if (runtime.Os == "macos")
+            {
+                CommandResult result = await processRunner.RunAsync(
+                    "otool",
+                    ["-L", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(result, "DynamicDependencyInspectionFailed");
+                dependencies = ParseMacDependencies(result.StandardOutput);
+            }
+            else
+            {
+                throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is unsupported.");
+            }
+
+            if (dependencies.Length == 0)
+            {
+                throw new ReleaseFailureException(
+                    "DynamicDependencyInspectionInvalid",
+                    $"The dependency inspection reported no native dependencies for '{Path.GetFileName(path)}'.");
+            }
+
+            evidenceLines.Add(Path.GetFileName(path) + ":");
+            foreach (string dependency in dependencies)
+            {
+                string bundledName = runtime.Os == "macos"
+                    ? Path.GetFileName(dependency)
+                    : dependency;
+                bool usesBundledFile = runtime.Os == "macos"
+                    ? (dependency.StartsWith("@rpath/", StringComparison.Ordinal) ||
+                       dependency.StartsWith("@loader_path/", StringComparison.Ordinal)) &&
+                      bundledFiles.Contains(bundledName)
+                    : bundledFiles.Contains(bundledName);
+                if (usesBundledFile)
+                {
+                    evidenceLines.Add("  bundled: " + dependency);
+                }
+                else if (allowedSystemDependencies.Contains(dependency))
+                {
+                    evidenceLines.Add("  system: " + dependency);
+                }
+                else
+                {
+                    throw new ReleaseFailureException(
+                        "UndeclaredSystemDependency",
+                        $"Native file '{Path.GetFileName(path)}' depends on undeclared system library '{dependency}'.");
+                }
+            }
+        }
+
+        string evidence = string.Join('\n', evidenceLines);
         await File.WriteAllTextAsync(
             Path.Combine(payloadRoot, "BUILD-METADATA", "dynamic-dependencies.txt"),
             evidence + "\n",
@@ -849,12 +945,355 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         return evidence;
     }
 
-    private static string CanonicalizeDependencyEvidence(string evidence, string payloadRoot)
+    internal static string[] ParseElfDependencies(string evidence) =>
+        ElfNeededPattern.Matches(evidence)
+            .Select(match => match.Groups["name"].Value)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+    internal static string[] ParseMacDependencies(string evidence) =>
+        evidence
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Skip(1)
+            .Select(line =>
+            {
+                int metadata = line.IndexOf(" (", StringComparison.Ordinal);
+                return metadata < 0 ? line : line[..metadata];
+            })
+            .Where(dependency => dependency.Length != 0)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+    private async Task<string> InspectAbiCompatibilityAsync(
+        string payloadRoot,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
     {
-        string canonical = evidence
-            .Replace(payloadRoot, "$PAYLOAD", StringComparison.Ordinal)
-            .Replace(payloadRoot.Replace('\\', '/'), "$PAYLOAD", StringComparison.Ordinal);
-        return LoadAddressPattern.Replace(canonical, "(address)");
+        var evidenceLines = new List<string>
+        {
+            $"runtimeIdentifier: {runtime.Rid}",
+            $"minimumOsVersion: {runtime.MinimumOsVersion ?? "not-versioned"}",
+            $"libc: {runtime.Libc ?? "not-applicable"}",
+            $"minimumLibcVersion: {runtime.MinimumLibcVersion ?? "not-applicable"}"
+        };
+        if (runtime.Os == "windows")
+        {
+            evidenceLines.Add("enforcement: PE architecture, complete import closure, and hardening gates");
+        }
+        else if (runtime.Os == "linux")
+        {
+            string maximumAllowed = runtime.MinimumLibcVersion!;
+            bool foundVersion = false;
+            foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal))
+            {
+                CommandResult result = await processRunner.RunAsync(
+                    "readelf",
+                    ["-W", "--version-info", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(result, "AbiCompatibilityInspectionFailed");
+                string[] versions = ParseGlibcVersions(result.StandardOutput + result.StandardError);
+                if (versions.Any(version => CompareDottedVersions(version, maximumAllowed) > 0))
+                {
+                    string incompatible = versions.Last(version => CompareDottedVersions(version, maximumAllowed) > 0);
+                    throw new ReleaseFailureException(
+                        "GlibcVersionFloorExceeded",
+                        $"Native file '{Path.GetFileName(path)}' requires GLIBC_{incompatible}, above the declared GLIBC_{maximumAllowed} boundary.");
+                }
+
+                if (versions.Length > 0)
+                {
+                    foundVersion = true;
+                    evidenceLines.Add($"{Path.GetFileName(path)}: maximum GLIBC_{versions[^1]}");
+                }
+                else
+                {
+                    evidenceLines.Add($"{Path.GetFileName(path)}: no GLIBC symbol versions");
+                }
+            }
+
+            if (!foundVersion)
+            {
+                throw new ReleaseFailureException(
+                    "AbiCompatibilityInspectionInvalid",
+                    "The glibc payload did not expose any versioned GLIBC symbol requirements.");
+            }
+
+            await ValidateElfInterpretersAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
+            evidenceLines.Add("interpreter: " + ExpectedElfInterpreter(runtime));
+        }
+        else if (runtime.Os == "linux-musl")
+        {
+            await ValidateElfInterpretersAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
+            evidenceLines.Add("interpreter: " + ExpectedElfInterpreter(runtime));
+            evidenceLines.Add("workerImage: " + runtime.WorkerImage);
+            evidenceLines.Add("enforcement: pinned Alpine worker plus exact musl interpreter and dependency allowlist");
+        }
+        else if (runtime.Os == "macos")
+        {
+            string expectedMinimum = runtime.MinimumOsVersion!;
+            foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal))
+            {
+                CommandResult result = await processRunner.RunAsync(
+                    "otool",
+                    ["-l", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(result, "AbiCompatibilityInspectionFailed");
+                string[] minimumVersions = ParseMacMinimumOsVersions(result.StandardOutput);
+                if (minimumVersions.Length != 1 ||
+                    CompareDottedVersions(minimumVersions[0], expectedMinimum) != 0)
+                {
+                    throw new ReleaseFailureException(
+                        "MacDeploymentTargetMismatch",
+                        $"Native file '{Path.GetFileName(path)}' does not record the exact macOS {expectedMinimum} deployment target.");
+                }
+
+                if (!result.StandardOutput.Contains("path @loader_path ", StringComparison.Ordinal))
+                {
+                    throw new ReleaseFailureException(
+                        "RuntimeSearchPathInvalid",
+                        $"Native file '{Path.GetFileName(path)}' does not have the required application-local @loader_path runpath.");
+                }
+
+                evidenceLines.Add($"{Path.GetFileName(path)}: macOS {minimumVersions[0]}, @loader_path");
+            }
+        }
+        else
+        {
+            throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is unsupported.");
+        }
+
+        string evidence = string.Join('\n', evidenceLines);
+        await File.WriteAllTextAsync(
+            Path.Combine(payloadRoot, "BUILD-METADATA", "abi-compatibility.txt"),
+            evidence + "\n",
+            new UTF8Encoding(false),
+            cancellationToken).ConfigureAwait(false);
+        return evidence;
+    }
+
+    private async Task ValidateElfInterpretersAsync(
+        string payloadRoot,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        string expected = ExpectedElfInterpreter(runtime);
+        foreach (string fileName in new[] { "ffmpeg", "ffprobe" })
+        {
+            string path = Path.Combine(payloadRoot, fileName);
+            CommandResult result = await processRunner.RunAsync(
+                "readelf",
+                ["-W", "-l", path],
+                payloadRoot,
+                TimeSpan.FromSeconds(60),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(result, "AbiCompatibilityInspectionFailed");
+            if (!result.StandardOutput.Contains($"Requesting program interpreter: {expected}", StringComparison.Ordinal))
+            {
+                throw new ReleaseFailureException(
+                    "ElfInterpreterMismatch",
+                    $"Native executable '{fileName}' does not use the declared '{expected}' interpreter.");
+            }
+        }
+    }
+
+    private static string ExpectedElfInterpreter(RuntimeDefinition runtime) => (runtime.Os, runtime.Architecture) switch
+    {
+        ("linux", "x64") => "/lib64/ld-linux-x86-64.so.2",
+        ("linux", "arm64") => "/lib/ld-linux-aarch64.so.1",
+        ("linux-musl", "x64") => "/lib/ld-musl-x86_64.so.1",
+        ("linux-musl", "arm64") => "/lib/ld-musl-aarch64.so.1",
+        _ => throw new ReleaseFailureException(
+            "UnsupportedElfInterpreter",
+            $"Runtime Identifier '{runtime.Rid}' has no approved ELF interpreter.")
+    };
+
+    internal static string[] ParseGlibcVersions(string evidence) =>
+        GlibcVersionPattern.Matches(evidence)
+            .Select(match => match.Groups["version"].Value)
+            .Distinct(StringComparer.Ordinal)
+            .Order(Comparer<string>.Create(CompareDottedVersions))
+            .ToArray();
+
+    internal static string[] ParseMacMinimumOsVersions(string evidence)
+    {
+        string? command = null;
+        var versions = new List<string>();
+        foreach (string line in evidence.Split(
+                     ['\r', '\n'],
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (line.StartsWith("cmd ", StringComparison.Ordinal))
+            {
+                command = line["cmd ".Length..];
+            }
+            else if (command == "LC_BUILD_VERSION" && line.StartsWith("minos ", StringComparison.Ordinal))
+            {
+                versions.Add(line["minos ".Length..]);
+            }
+            else if (command == "LC_VERSION_MIN_MACOSX" && line.StartsWith("version ", StringComparison.Ordinal))
+            {
+                versions.Add(line["version ".Length..]);
+            }
+        }
+
+        return versions
+            .Distinct(StringComparer.Ordinal)
+            .Order(Comparer<string>.Create(CompareDottedVersions))
+            .ToArray();
+    }
+
+    internal static int CompareDottedVersions(string left, string right)
+    {
+        int[] leftParts = ParseDottedVersion(left);
+        int[] rightParts = ParseDottedVersion(right);
+        for (int index = 0; index < Math.Max(leftParts.Length, rightParts.Length); index++)
+        {
+            int leftPart = index < leftParts.Length ? leftParts[index] : 0;
+            int rightPart = index < rightParts.Length ? rightParts[index] : 0;
+            int comparison = leftPart.CompareTo(rightPart);
+            if (comparison != 0)
+            {
+                return comparison;
+            }
+        }
+
+        return 0;
+    }
+
+    private static int[] ParseDottedVersion(string value)
+    {
+        string[] parts = value.Split('.');
+        if (parts.Length is < 2 or > 3 ||
+            parts.Any(part => !int.TryParse(
+                part,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out _)))
+        {
+            throw new ReleaseFailureException("InvalidCompatibilityVersion", $"Compatibility version '{value}' is invalid.");
+        }
+
+        return parts.Select(part => int.Parse(part, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+    }
+
+    private async Task<string> InspectHardeningAsync(
+        string payloadRoot,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        var evidenceLines = new List<string>();
+        foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal))
+        {
+            string fileName = Path.GetFileName(path);
+            if (runtime.Os == "windows")
+            {
+                CommandResult result = await processRunner.RunAsync(
+                    "objdump",
+                    ["-p", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(result, "HardeningInspectionFailed");
+                if (!result.StandardOutput.Contains("DYNAMIC_BASE", StringComparison.Ordinal) ||
+                    !result.StandardOutput.Contains("NX_COMPAT", StringComparison.Ordinal))
+                {
+                    throw new ReleaseFailureException(
+                        "NativeHardeningMissing",
+                        $"PE file '{fileName}' does not enable ASLR and NX compatibility.");
+                }
+
+                evidenceLines.Add($"{fileName}: ASLR, NX_COMPAT");
+            }
+            else if (runtime.Os is "linux" or "linux-musl")
+            {
+                CommandResult result = await processRunner.RunAsync(
+                    "readelf",
+                    ["-W", "-h", "-l", "-d", "-s", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(result, "HardeningInspectionFailed");
+                string output = result.StandardOutput;
+                string? stackLine = output
+                    .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .SingleOrDefault(line => line.StartsWith("GNU_STACK", StringComparison.Ordinal));
+                string[] stackColumns = stackLine?.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries) ?? [];
+                bool nonExecutableStack = stackColumns.Length >= 2 &&
+                    !stackColumns[^2].Contains('E', StringComparison.Ordinal);
+                bool positionIndependent = output
+                    .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Any(line => line.StartsWith("Type:", StringComparison.Ordinal) &&
+                                 line.Contains("DYN", StringComparison.Ordinal));
+                bool relro = output.Contains("GNU_RELRO", StringComparison.Ordinal);
+                bool immediateBinding = output.Contains("(BIND_NOW)", StringComparison.Ordinal) ||
+                    output.Contains("Flags: NOW", StringComparison.Ordinal);
+                bool stackProtector = output.Contains("__stack_chk_fail", StringComparison.Ordinal);
+                bool executablePie = fileName is not ("ffmpeg" or "ffprobe") ||
+                    output
+                        .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Any(line => line.Contains("Flags:", StringComparison.Ordinal) &&
+                                     line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                                         .Contains("PIE", StringComparer.Ordinal));
+                if (!nonExecutableStack || !positionIndependent || !relro || !immediateBinding ||
+                    !stackProtector || !executablePie)
+                {
+                    throw new ReleaseFailureException(
+                        "NativeHardeningMissing",
+                        $"ELF file '{fileName}' does not satisfy the NX, PIE, RELRO, immediate-binding, and stack-protector baseline.");
+                }
+
+                evidenceLines.Add($"{fileName}: NX stack, PIE/PIC, RELRO, BIND_NOW, stack protector");
+            }
+            else if (runtime.Os == "macos")
+            {
+                CommandResult header = await processRunner.RunAsync(
+                    "otool",
+                    ["-hv", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(header, "HardeningInspectionFailed");
+                bool executablePie = fileName is not ("ffmpeg" or "ffprobe") ||
+                    header.StandardOutput
+                        .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Any(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                            .Contains("PIE", StringComparer.Ordinal));
+                CommandResult symbols = await processRunner.RunAsync(
+                    "nm",
+                    ["-u", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(symbols, "HardeningInspectionFailed");
+                if (!executablePie ||
+                    !symbols.StandardOutput.Contains("___stack_chk_fail", StringComparison.Ordinal))
+                {
+                    throw new ReleaseFailureException(
+                        "NativeHardeningMissing",
+                        $"Mach-O file '{fileName}' does not satisfy the PIE and stack-protector baseline.");
+                }
+
+                evidenceLines.Add($"{fileName}: PIE/PIC, stack protector");
+            }
+            else
+            {
+                throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is unsupported.");
+            }
+        }
+
+        string evidence = string.Join('\n', evidenceLines);
+        await File.WriteAllTextAsync(
+            Path.Combine(payloadRoot, "BUILD-METADATA", "hardening.txt"),
+            evidence + "\n",
+            new UTF8Encoding(false),
+            cancellationToken).ConfigureAwait(false);
+        return evidence;
     }
 
     internal static string CanonicalizeWindowsDependencyEvidence(string evidence)
@@ -1111,6 +1550,115 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         Directory.CreateDirectory(fullPath);
     }
 
+    private async Task ValidateBuildBaselineAsync(
+        string workingDirectory,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        if (runtime.Os == "windows")
+        {
+            return;
+        }
+
+        if (runtime.Os == "linux")
+        {
+            string osRelease = await File.ReadAllTextAsync("/etc/os-release", cancellationToken).ConfigureAwait(false);
+            if (!ReadOsReleaseValue(osRelease, "ID").Equals("ubuntu", StringComparison.Ordinal) ||
+                !ReadOsReleaseValue(osRelease, "VERSION_ID").Equals(runtime.MinimumOsVersion, StringComparison.Ordinal))
+            {
+                throw new ReleaseFailureException(
+                    "WorkerOperatingSystemBaselineMismatch",
+                    $"Runtime Identifier '{runtime.Rid}' must be built on Ubuntu {runtime.MinimumOsVersion}.");
+            }
+
+            CommandResult result = await processRunner.RunAsync(
+                "getconf",
+                ["GNU_LIBC_VERSION"],
+                workingDirectory,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(result, "WorkerLibcBaselineInspectionFailed");
+            string actualVersion = result.StandardOutput
+                .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
+                .LastOrDefault() ?? string.Empty;
+            if (CompareDottedVersions(actualVersion, runtime.MinimumLibcVersion!) != 0)
+            {
+                throw new ReleaseFailureException(
+                    "WorkerLibcBaselineMismatch",
+                    $"Runtime Identifier '{runtime.Rid}' must be built against glibc {runtime.MinimumLibcVersion}.");
+            }
+
+            return;
+        }
+
+        if (runtime.Os == "linux-musl")
+        {
+            string alpineVersion = (await File.ReadAllTextAsync("/etc/alpine-release", cancellationToken).ConfigureAwait(false)).Trim();
+            if (!(alpineVersion.Equals(runtime.MinimumOsVersion, StringComparison.Ordinal) ||
+                  alpineVersion.StartsWith(runtime.MinimumOsVersion + ".", StringComparison.Ordinal)) ||
+                !string.Equals(
+                    Environment.GetEnvironmentVariable("SUPPROCOM_WORKER_IMAGE"),
+                    runtime.WorkerImage,
+                    StringComparison.Ordinal))
+            {
+                throw new ReleaseFailureException(
+                    "WorkerOperatingSystemBaselineMismatch",
+                    $"Runtime Identifier '{runtime.Rid}' must use its pinned Alpine {runtime.MinimumOsVersion} worker image.");
+            }
+
+            string loader = ExpectedElfInterpreter(runtime);
+            CommandResult result = await processRunner.RunAsync(
+                loader,
+                [],
+                workingDirectory,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            Match version = MuslVersionPattern.Match(result.StandardOutput + result.StandardError);
+            if (!version.Success ||
+                CompareDottedVersions(version.Groups["version"].Value, runtime.MinimumLibcVersion!) != 0)
+            {
+                throw new ReleaseFailureException(
+                    "WorkerLibcBaselineMismatch",
+                    $"Runtime Identifier '{runtime.Rid}' must be built against musl {runtime.MinimumLibcVersion}.");
+            }
+
+            return;
+        }
+
+        if (runtime.Os == "macos")
+        {
+            CommandResult result = await processRunner.RunAsync(
+                "sw_vers",
+                ["-productVersion"],
+                workingDirectory,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(result, "WorkerOperatingSystemBaselineInspectionFailed");
+            string actualVersion = result.StandardOutput.Trim();
+            int[] parts = ParseDottedVersion(actualVersion);
+            int[] baseline = ParseDottedVersion(runtime.MinimumOsVersion!);
+            if (parts[0] != baseline[0] || CompareDottedVersions(actualVersion, runtime.MinimumOsVersion!) < 0)
+            {
+                throw new ReleaseFailureException(
+                    "WorkerOperatingSystemBaselineMismatch",
+                    $"Runtime Identifier '{runtime.Rid}' must be built on macOS {runtime.MinimumOsVersion}.x.");
+            }
+
+            return;
+        }
+
+        throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is unsupported.");
+    }
+
+    internal static string ReadOsReleaseValue(string content, string key)
+    {
+        string prefix = key + "=";
+        string? line = content
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .SingleOrDefault(candidate => candidate.StartsWith(prefix, StringComparison.Ordinal));
+        return line is null ? string.Empty : line[prefix.Length..].Trim('"', '\'');
+    }
+
     private static void ValidateWorkerHost(RuntimeDefinition runtime)
     {
         bool matchesOs = runtime.Os switch
@@ -1190,5 +1738,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         string PayloadDirectory,
         IReadOnlyList<string> ConfigureArguments,
         string ArchitectureEvidence,
-        string DynamicDependencyEvidence);
+        string DynamicDependencyEvidence,
+        string AbiCompatibilityEvidence,
+        string HardeningEvidence);
 }

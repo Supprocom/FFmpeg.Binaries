@@ -11,6 +11,14 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
 {
     private static readonly TimeSpan PackTimeout = TimeSpan.FromMinutes(5);
     private static readonly JsonSerializerOptions IndentedJson = new() { WriteIndented = true };
+    private static readonly string[] RequiredSourceLicenseEntries =
+    [
+        "licenses/FFmpeg-LICENSE.md",
+        "licenses/COPYING.GPLv2",
+        "licenses/COPYING.GPLv3",
+        "licenses/COPYING.LGPLv2.1",
+        "licenses/COPYING.LGPLv3"
+    ];
     private const long MaximumPackageBytes = 250L * 1024 * 1024;
 
     public async Task<string> AssembleAsync(
@@ -165,20 +173,27 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         IReadOnlyList<FrozenPackage> packages,
         CancellationToken cancellationToken)
     {
-        object[] spdxPackages = packages.Select(package => (object)new
+        object[] spdxPackages = packages.Select(package =>
         {
-            name = package.Id,
-            SPDXID = "SPDXRef-Package-" + package.Id,
-            versionInfo = package.Version,
-            downloadLocation = "NOASSERTION",
-            filesAnalyzed = false,
-            licenseConcluded = "LGPL-2.1-or-later",
-            licenseDeclared = "LGPL-2.1-or-later",
-            copyrightText = "NOASSERTION",
-            checksums = new[]
+            bool isCompleteSource = package.Kind.Equals("source", StringComparison.Ordinal);
+            return (object)new
             {
-                new { algorithm = "SHA256", checksumValue = package.Sha256 }
-            }
+                name = package.Id,
+                SPDXID = "SPDXRef-Package-" + package.Id,
+                versionInfo = package.Version,
+                downloadLocation = "NOASSERTION",
+                filesAnalyzed = false,
+                licenseConcluded = isCompleteSource ? "NOASSERTION" : "LGPL-2.1-or-later",
+                licenseDeclared = isCompleteSource ? "NOASSERTION" : "LGPL-2.1-or-later",
+                licenseComments = isCompleteSource
+                    ? "Complete upstream FFmpeg source archive with file-specific LGPL-2.1-or-later, GPL-2.0-or-later, GPL-3.0-or-later, MIT, BSD, Expat, and IJG terms. See licenses/FFmpeg-LICENSE.md, the four COPYING files, and notices in the source archive."
+                    : "License claim is scoped to the LGPL-configured binary/package family built with GPL and nonfree code disabled.",
+                copyrightText = "NOASSERTION",
+                checksums = new[]
+                {
+                    new { algorithm = "SHA256", checksumValue = package.Sha256 }
+                }
+            };
         }).ToArray();
         object[] relationships = packages.Select(package => (object)new
         {
@@ -301,6 +316,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         string root = Path.Combine(packageWork, flavor.SourcePackageId);
         Directory.CreateDirectory(Path.Combine(root, "source"));
         Directory.CreateDirectory(Path.Combine(root, "build"));
+        Directory.CreateDirectory(Path.Combine(root, "licenses"));
         Directory.CreateDirectory(Path.Combine(root, "provenance", "workers"));
         Directory.CreateDirectory(Path.Combine(root, "patches"));
         File.Copy(source.ArchivePath, Path.Combine(root, "source", Path.GetFileName(source.ArchivePath)));
@@ -331,10 +347,27 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             }
         }
 
-        File.Copy(Path.Combine(repositoryRoot, "COPYING.LGPLv2.1"), Path.Combine(root, "COPYING.LGPLv2.1"));
-        File.Copy(Path.Combine(repositoryRoot, "COPYING.LGPLv3"), Path.Combine(root, "COPYING.LGPLv3"));
-        File.Copy(Path.Combine(repositoryRoot, "LICENSE.md"), Path.Combine(root, "LICENSE.md"));
-        File.Copy(Path.Combine(repositoryRoot, "packaging", "README.md"), Path.Combine(root, "README.md"));
+        string archiveRoot = $"ffmpeg-{plan.Version}";
+        CommandResult licenseExtraction = await processRunner.RunAsync(
+            "tar",
+            [
+                "-xJf", source.ArchivePath,
+                "--strip-components=1",
+                "-C", Path.Combine(root, "licenses"),
+                $"{archiveRoot}/COPYING.GPLv2",
+                $"{archiveRoot}/COPYING.GPLv3",
+                $"{archiveRoot}/COPYING.LGPLv2.1",
+                $"{archiveRoot}/COPYING.LGPLv3",
+                $"{archiveRoot}/LICENSE.md"
+            ],
+            root,
+            TimeSpan.FromMinutes(2),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(licenseExtraction, "SourceLicenseExtractionFailed");
+        File.Move(
+            Path.Combine(root, "licenses", "LICENSE.md"),
+            Path.Combine(root, "licenses", "FFmpeg-LICENSE.md"));
+        File.Copy(Path.Combine(repositoryRoot, "packaging", "SOURCE-README.md"), Path.Combine(root, "README.md"));
         string nuspec = CreateNuspec(
             flavor.SourcePackageId,
             plan,
@@ -345,11 +378,14 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 ("build/**/*", "build"),
                 ("provenance/**/*", "provenance"),
                 ("patches/**/*", "patches"),
-                ("COPYING.LGPLv2.1", "licenses"),
-                ("COPYING.LGPLv3", "licenses"),
-                ("LICENSE.md", "licenses"),
+                ("licenses/COPYING.GPLv2", "licenses"),
+                ("licenses/COPYING.GPLv3", "licenses"),
+                ("licenses/COPYING.LGPLv2.1", "licenses"),
+                ("licenses/COPYING.LGPLv3", "licenses"),
+                ("licenses/FFmpeg-LICENSE.md", "licenses"),
                 ("README.md", string.Empty)
-            ]);
+            ],
+            licenseFile: "licenses/FFmpeg-LICENSE.md");
         return await PackNuspecAsync(
             root,
             nuspec,
@@ -427,12 +463,13 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         return RequireSingleCandidate(candidateDirectory, $"{packageId}.{version}.nupkg");
     }
 
-    private static string CreateNuspec(
+    internal static string CreateNuspec(
         string packageId,
         ReleasePlan plan,
         string description,
         List<(string Id, string Version)> dependencies,
-        List<(string Source, string Target)> files)
+        List<(string Source, string Target)> files,
+        string? licenseFile = null)
     {
         string dependencyXml = dependencies.Count == 0
             ? string.Empty
@@ -440,6 +477,9 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 $"<dependency id=\"{Escape(dependency.Id)}\" version=\"[{Escape(dependency.Version)}]\" />")) + "</dependencies>";
         string fileXml = string.Concat(files.Select(file =>
             $"<file src=\"{Escape(file.Source)}\" target=\"{Escape(file.Target)}\" />"));
+        string licenseXml = licenseFile is null
+            ? "<license type=\"expression\">LGPL-2.1-or-later</license>"
+            : $"<license type=\"file\">{Escape(licenseFile)}</license>";
         return $"""
             <?xml version="1.0" encoding="utf-8"?>
             <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
@@ -449,7 +489,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 <authors>Supprocom</authors>
                 <owners>Supprocom</owners>
                 <requireLicenseAcceptance>false</requireLicenseAcceptance>
-                <license type="expression">LGPL-2.1-or-later</license>
+                {licenseXml}
                 <readme>README.md</readme>
                 <projectUrl>https://github.com/Supprocom/FFmpeg.Binaries</projectUrl>
                 <repository type="git" url="https://github.com/Supprocom/FFmpeg.Binaries.git" commit="{Escape(plan.ReleaseProgramCommit)}" />
@@ -517,13 +557,21 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             await File.ReadAllBytesAsync(manifestPath, cancellationToken).ConfigureAwait(false),
             ReleaseJsonContext.Default.WorkerManifest)
             ?? throw new ReleaseFailureException("WorkerManifestInvalid", $"The {runtime.Rid} worker manifest is empty.");
-        if (!manifest.PlanSha256.Equals(planHash, StringComparison.Ordinal) ||
+        if (manifest.SchemaVersion != 2 ||
+            !manifest.PlanSha256.Equals(planHash, StringComparison.Ordinal) ||
             !manifest.Version.Equals(plan.Version, StringComparison.Ordinal) ||
             !manifest.SourceCommit.Equals(plan.SourceCommit, StringComparison.Ordinal) ||
             !manifest.ArchiveSha256.Equals(plan.ArchiveSha256, StringComparison.Ordinal) ||
             !manifest.Flavor.Equals(plan.Flavor, StringComparison.Ordinal) ||
             !manifest.RuntimeIdentifier.Equals(runtime.Rid, StringComparison.Ordinal) ||
             !manifest.Worker.Equals(runtime.Worker, StringComparison.Ordinal) ||
+            string.IsNullOrWhiteSpace(manifest.ArchitectureEvidence) ||
+            string.IsNullOrWhiteSpace(manifest.DynamicDependencyEvidence) ||
+            string.IsNullOrWhiteSpace(manifest.AbiCompatibilityEvidence) ||
+            string.IsNullOrWhiteSpace(manifest.HardeningEvidence) ||
+            !manifest.Files.Any(file => file.Path.Equals("BUILD-METADATA/abi-compatibility.txt", StringComparison.Ordinal)) ||
+            !manifest.Files.Any(file => file.Path.Equals("BUILD-METADATA/dynamic-dependencies.txt", StringComparison.Ordinal)) ||
+            !manifest.Files.Any(file => file.Path.Equals("BUILD-METADATA/hardening.txt", StringComparison.Ordinal)) ||
             !manifest.Reproducible ||
             !manifest.SmokeTestPassed)
         {
@@ -645,8 +693,16 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
 
         XElement? repository = metadata.Elements().SingleOrDefault(element => element.Name.LocalName == "repository");
         XElement? license = metadata.Elements().SingleOrDefault(element => element.Name.LocalName == "license");
+        bool validLicense = kind.Equals("source", StringComparison.Ordinal)
+            ? license is not null &&
+              license.Attribute("type")?.Value == "file" &&
+              license.Value == "licenses/FFmpeg-LICENSE.md" &&
+              RequiredSourceLicenseEntries.All(name => names.Contains(name, StringComparer.Ordinal))
+            : license is not null &&
+              license.Attribute("type")?.Value == "expression" &&
+              license.Value == "LGPL-2.1-or-later";
         if (repository?.Attribute("url")?.Value != "https://github.com/Supprocom/FFmpeg.Binaries.git" ||
-            license?.Value != "LGPL-2.1-or-later" ||
+            !validLicense ||
             !names.Contains("README.md", StringComparer.Ordinal))
         {
             throw new ReleaseFailureException("PackageMetadataInvalid", $"Package '{expectedId}' lacks approved repository, license, or README metadata.");
@@ -760,7 +816,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 (result.StandardError + "\n" + result.StandardOutput)
                     .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .TakeLast(20));
-            throw new ReleaseFailureException(code, $"NuGet package creation failed.\n{diagnostic}");
+            throw new ReleaseFailureException(code, $"A required package-assembly command failed.\n{diagnostic}");
         }
     }
 }

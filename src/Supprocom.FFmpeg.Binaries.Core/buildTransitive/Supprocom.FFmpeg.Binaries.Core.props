@@ -1,6 +1,5 @@
 <Project>
   <PropertyGroup>
     <SupprocomFFmpegCopyToOutput Condition="'$(SupprocomFFmpegCopyToOutput)' == ''">true</SupprocomFFmpegCopyToOutput>
-    <SupprocomFFmpegOutputDirectory Condition="'$(SupprocomFFmpegOutputDirectory)' == ''">ffmpeg</SupprocomFFmpegOutputDirectory>
   </PropertyGroup>
 </Project>

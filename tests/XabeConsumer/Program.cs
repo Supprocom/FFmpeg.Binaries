@@ -29,6 +29,7 @@ try
 }
 finally
 {
+    Environment.SetEnvironmentVariable("PATH", path);
     File.Delete(input);
 }
 

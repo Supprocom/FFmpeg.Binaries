@@ -28,7 +28,16 @@ internal sealed record VersionDefinition(
     string? TagObject = null,
     string? SourceCommit = null);
 
-internal sealed record RuntimeDefinition(string Rid, string Os, string Architecture, string Worker);
+internal sealed record RuntimeDefinition(
+    string Rid,
+    string Os,
+    string Architecture,
+    string Worker,
+    string? MinimumOsVersion = null,
+    string? Libc = null,
+    string? MinimumLibcVersion = null,
+    string? WorkerImage = null,
+    IReadOnlyList<string>? SystemDependencies = null);
 
 internal sealed record FlavorDefinition(
     string Name,
@@ -94,6 +103,8 @@ internal sealed record WorkerManifest(
     IReadOnlyList<string> FateTests,
     string ArchitectureEvidence,
     string DynamicDependencyEvidence,
+    string AbiCompatibilityEvidence,
+    string HardeningEvidence,
     bool SmokeTestPassed,
     bool Reproducible,
     IReadOnlyList<WorkerFile> Files,

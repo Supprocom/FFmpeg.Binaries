@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "repository": {
     "origin": "https://github.com/Supprocom/FFmpeg.Binaries.git",
     "officialSource": "https://git.ffmpeg.org/ffmpeg.git"
@@ -46,12 +46,74 @@
     { "rid": "win-x86", "os": "windows", "architecture": "x86", "worker": "windows-2025" },
     { "rid": "win-x64", "os": "windows", "architecture": "x64", "worker": "windows-2025" },
     { "rid": "win-arm64", "os": "windows", "architecture": "arm64", "worker": "windows-11-arm" },
-    { "rid": "linux-x64", "os": "linux", "architecture": "x64", "worker": "ubuntu-24.04" },
-    { "rid": "linux-arm64", "os": "linux", "architecture": "arm64", "worker": "ubuntu-24.04-arm" },
-    { "rid": "linux-musl-x64", "os": "linux-musl", "architecture": "x64", "worker": "ubuntu-24.04" },
-    { "rid": "linux-musl-arm64", "os": "linux-musl", "architecture": "arm64", "worker": "ubuntu-24.04-arm" },
-    { "rid": "osx-x64", "os": "macos", "architecture": "x64", "worker": "macos-15-intel" },
-    { "rid": "osx-arm64", "os": "macos", "architecture": "arm64", "worker": "macos-15" }
+    {
+      "rid": "linux-x64",
+      "os": "linux",
+      "architecture": "x64",
+      "worker": "ubuntu-24.04",
+      "minimumOsVersion": "24.04",
+      "libc": "glibc",
+      "minimumLibcVersion": "2.39",
+      "systemDependencies": ["libc.so.6", "libdl.so.2", "libm.so.6", "libpthread.so.0", "librt.so.1"]
+    },
+    {
+      "rid": "linux-arm64",
+      "os": "linux",
+      "architecture": "arm64",
+      "worker": "ubuntu-24.04-arm",
+      "minimumOsVersion": "24.04",
+      "libc": "glibc",
+      "minimumLibcVersion": "2.39",
+      "systemDependencies": ["libc.so.6", "libdl.so.2", "libm.so.6", "libpthread.so.0", "librt.so.1"]
+    },
+    {
+      "rid": "linux-musl-x64",
+      "os": "linux-musl",
+      "architecture": "x64",
+      "worker": "ubuntu-24.04",
+      "minimumOsVersion": "3.23",
+      "libc": "musl",
+      "minimumLibcVersion": "1.2.5",
+      "workerImage": "mcr.microsoft.com/dotnet/sdk@sha256:3f9c03432d664163a90d20e3ed0a3784d0aa82c1b9cbd1a7dd4609fede95669e",
+      "systemDependencies": ["libc.musl-x86_64.so.1"]
+    },
+    {
+      "rid": "linux-musl-arm64",
+      "os": "linux-musl",
+      "architecture": "arm64",
+      "worker": "ubuntu-24.04-arm",
+      "minimumOsVersion": "3.23",
+      "libc": "musl",
+      "minimumLibcVersion": "1.2.5",
+      "workerImage": "mcr.microsoft.com/dotnet/sdk@sha256:3f9c03432d664163a90d20e3ed0a3784d0aa82c1b9cbd1a7dd4609fede95669e",
+      "systemDependencies": ["libc.musl-aarch64.so.1"]
+    },
+    {
+      "rid": "osx-x64",
+      "os": "macos",
+      "architecture": "x64",
+      "worker": "macos-15-intel",
+      "minimumOsVersion": "15.0",
+      "systemDependencies": [
+        "/usr/lib/libSystem.B.dylib",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo"
+      ]
+    },
+    {
+      "rid": "osx-arm64",
+      "os": "macos",
+      "architecture": "arm64",
+      "worker": "macos-15",
+      "minimumOsVersion": "15.0",
+      "systemDependencies": [
+        "/usr/lib/libSystem.B.dylib",
+        "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+        "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia",
+        "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo"
+      ]
+    }
   ],
   "flavors": [
     {

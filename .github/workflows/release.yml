@@ -118,6 +118,7 @@ jobs:
           docker run --rm \
             --env RELEASE_RID \
             --env RELEASE_VERSION \
+            --env SUPPROCOM_WORKER_IMAGE="${SDK_IMAGE}" \
             --volume "${GITHUB_WORKSPACE}:/workspace" \
             --volume "${RUNNER_TEMP}:/runner-temp" \
             --workdir /workspace \

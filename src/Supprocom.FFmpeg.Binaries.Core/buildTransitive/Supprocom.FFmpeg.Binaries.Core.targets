@@ -1,4 +1,10 @@
 <Project>
+  <Target Name="SupprocomFFmpegValidateOutputDirectoryContract"
+          BeforeTargets="PrepareForBuild"
+          Condition="'$(SupprocomFFmpegOutputDirectory)' != '' and '$(SupprocomFFmpegOutputDirectory)' != 'ffmpeg'">
+    <Error Text="SupprocomFFmpegOutputDirectory is not supported. The runtime API and package deployment use the fixed application-local 'ffmpeg' directory." />
+  </Target>
+
   <Target Name="SupprocomFFmpegSuppressDefaultNativeCopy"
           BeforeTargets="ResolveLockFileCopyLocalFiles;GenerateBuildDependencyFile;GeneratePublishDependencyFile"
           DependsOnTargets="ResolvePackageAssets">
@@ -16,7 +22,7 @@
     <PropertyGroup>
       <SupprocomFFmpegRuntimeIdentifier Condition="'$(SupprocomFFmpegRuntimeIdentifier)' == '' and '$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</SupprocomFFmpegRuntimeIdentifier>
       <SupprocomFFmpegRuntimeIdentifier Condition="'$(SupprocomFFmpegRuntimeIdentifier)' == '' and '$(NETCoreSdkRuntimeIdentifier)' != ''">$(NETCoreSdkRuntimeIdentifier)</SupprocomFFmpegRuntimeIdentifier>
-      <SupprocomFFmpegDirectory>$(TargetDir)$(SupprocomFFmpegOutputDirectory)</SupprocomFFmpegDirectory>
+      <SupprocomFFmpegDirectory>$(TargetDir)ffmpeg</SupprocomFFmpegDirectory>
       <SupprocomFFmpegExecutableSuffix Condition="'$(SupprocomFFmpegRuntimeIdentifier)' == 'win-x86' or '$(SupprocomFFmpegRuntimeIdentifier)' == 'win-x64' or '$(SupprocomFFmpegRuntimeIdentifier)' == 'win-arm64'">.exe</SupprocomFFmpegExecutableSuffix>
       <SupprocomFFmpegPath>$(SupprocomFFmpegDirectory)/ffmpeg$(SupprocomFFmpegExecutableSuffix)</SupprocomFFmpegPath>
       <SupprocomFFprobePath>$(SupprocomFFmpegDirectory)/ffprobe$(SupprocomFFmpegExecutableSuffix)</SupprocomFFprobePath>
@@ -40,9 +46,9 @@
           AfterTargets="CopyFilesToOutputDirectory"
           Condition="'$(SupprocomFFmpegCopyToOutput)' == 'true'"
           Inputs="@(SupprocomFFmpegPayload)"
-          Outputs="@(SupprocomFFmpegPayload->'$(TargetDir)$(SupprocomFFmpegOutputDirectory)/%(RecursiveDir)%(Filename)%(Extension)')">
+          Outputs="@(SupprocomFFmpegPayload->'$(TargetDir)ffmpeg/%(RecursiveDir)%(Filename)%(Extension)')">
     <Copy SourceFiles="@(SupprocomFFmpegPayload)"
-          DestinationFiles="@(SupprocomFFmpegPayload->'$(TargetDir)$(SupprocomFFmpegOutputDirectory)/%(RecursiveDir)%(Filename)%(Extension)')"
+          DestinationFiles="@(SupprocomFFmpegPayload->'$(TargetDir)ffmpeg/%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 
@@ -51,7 +57,7 @@
           Condition="'$(SupprocomFFmpegCopyToOutput)' == 'true'">
     <ItemGroup>
       <ResolvedFileToPublish Include="@(SupprocomFFmpegPayload)">
-        <RelativePath>$(SupprocomFFmpegOutputDirectory)/%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
+        <RelativePath>ffmpeg/%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
         <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
       </ResolvedFileToPublish>

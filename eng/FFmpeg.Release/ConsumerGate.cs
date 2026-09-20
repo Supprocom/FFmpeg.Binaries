@@ -102,6 +102,14 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
 
         if (runtime.Rid == "linux-x64")
         {
+            await AssertOutputDirectoryOverrideRejectedAsync(
+                repositoryRoot,
+                root,
+                environment,
+                runtime,
+                version.Version,
+                cancellationToken).ConfigureAwait(false);
+            scenarios.Add("fixed-output-directory-contract");
             await PublishAndRunAsync(
                 repositoryRoot,
                 packages,
@@ -319,6 +327,62 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             environment,
             cancellationToken).ConfigureAwait(false);
         EnsureSuccess(result, "WrapperExecutionFailed");
+    }
+
+    private async Task AssertOutputDirectoryOverrideRejectedAsync(
+        string repositoryRoot,
+        string root,
+        Dictionary<string, string?> environment,
+        RuntimeDefinition runtime,
+        string version,
+        CancellationToken cancellationToken)
+    {
+        const string scenario = "unsupported-output-directory-override";
+        string projectRoot = CopyFixture(repositoryRoot, root, "PackageConsumer", scenario);
+        string project = Path.Combine(projectRoot, "PackageConsumer.csproj");
+        IReadOnlyList<string> properties =
+        [
+            $"-p:TestRid={runtime.Rid}",
+            "-p:SupprocomPackageId=Supprocom.FFmpeg.Binaries",
+            $"-p:SupprocomPackageVersion={version}",
+            $"-p:SupprocomFFmpegRuntimeIdentifier={runtime.Rid}",
+            "-p:TargetFramework=net10.0"
+        ];
+        await RunDotnetAsync(
+            [
+                "restore", project,
+                "--packages", environment["NUGET_PACKAGES"]!,
+                "--configfile", environment["SUPPROCOM_NUGET_CONFIG"]!,
+                .. properties,
+                "--nologo"
+            ],
+            projectRoot,
+            RestoreTimeout,
+            environment,
+            "OutputDirectoryContractRestoreFailed",
+            cancellationToken).ConfigureAwait(false);
+        CommandResult result = await processRunner.RunAsync(
+            "dotnet",
+            [
+                "build", project,
+                "--configuration", "Release",
+                "--no-restore",
+                .. properties,
+                "-p:SupprocomFFmpegOutputDirectory=custom-ffmpeg",
+                "--nologo"
+            ],
+            projectRoot,
+            BuildTimeout,
+            environment,
+            cancellationToken).ConfigureAwait(false);
+        string diagnostic = result.StandardOutput + result.StandardError;
+        if (result.ExitCode == 0 ||
+            !diagnostic.Contains("SupprocomFFmpegOutputDirectory is not supported", StringComparison.Ordinal))
+        {
+            throw new ReleaseFailureException(
+                "OutputDirectoryContractNotEnforced",
+                "The consumer build did not reject an output-directory override that would diverge from the runtime helper API.");
+        }
     }
 
     private async Task BuildNetFrameworkAsync(

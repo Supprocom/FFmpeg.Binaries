@@ -5,6 +5,9 @@ namespace Supprocom.FFmpeg.Release;
 
 internal static class MatrixLoader
 {
+    private const string MuslWorkerImage =
+        "mcr.microsoft.com/dotnet/sdk@sha256:3f9c03432d664163a90d20e3ed0a3784d0aa82c1b9cbd1a7dd4609fede95669e";
+
     private static readonly HashSet<string> RequiredRuntimeIdentifiers = new(StringComparer.Ordinal)
     {
         "win-x86",
@@ -53,9 +56,9 @@ internal static class MatrixLoader
 
     internal static void Validate(ReleaseMatrix matrix)
     {
-        if (matrix.SchemaVersion != 1)
+        if (matrix.SchemaVersion != 2)
         {
-            throw new ReleaseFailureException("UnsupportedMatrixSchema", "Only release-matrix schema version 1 is supported.");
+            throw new ReleaseFailureException("UnsupportedMatrixSchema", "Only release-matrix schema version 2 is supported.");
         }
 
         string[] actualRids = matrix.RuntimeIdentifiers.Select(item => item.Rid).ToArray();
@@ -66,6 +69,8 @@ internal static class MatrixLoader
                 "IncompleteRuntimeMatrix",
                 "The stable release matrix must contain exactly the nine approved Runtime Identifiers.");
         }
+
+        ValidateRuntimePolicies(matrix.RuntimeIdentifiers);
 
         if (matrix.Flavors.Count != 1 || !matrix.Flavors[0].Name.Equals("lgpl", StringComparison.Ordinal))
         {
@@ -136,6 +141,96 @@ internal static class MatrixLoader
             throw new ReleaseFailureException("FeedMismatch", "The release feeds do not match the approved NuGet.org and Supprocom endpoints.");
         }
     }
+
+    private static void ValidateRuntimePolicies(IReadOnlyList<RuntimeDefinition> runtimes)
+    {
+        string[] glibcDependencies = ["libc.so.6", "libdl.so.2", "libm.so.6", "libpthread.so.0", "librt.so.1"];
+        string[] macDependencies =
+        [
+            "/usr/lib/libSystem.B.dylib",
+            "/System/Library/Frameworks/CoreFoundation.framework/Versions/A/CoreFoundation",
+            "/System/Library/Frameworks/CoreMedia.framework/Versions/A/CoreMedia",
+            "/System/Library/Frameworks/CoreVideo.framework/Versions/A/CoreVideo"
+        ];
+        foreach (RuntimeDefinition runtime in runtimes)
+        {
+            switch (runtime.Os)
+            {
+                case "windows":
+                    if (runtime.MinimumOsVersion is not null ||
+                        runtime.Libc is not null ||
+                        runtime.MinimumLibcVersion is not null ||
+                        runtime.WorkerImage is not null ||
+                        runtime.SystemDependencies is { Count: > 0 })
+                    {
+                        throw InvalidRuntimePolicy(runtime);
+                    }
+
+                    break;
+                case "linux":
+                    RequireRuntimePolicy(
+                        runtime,
+                        "24.04",
+                        "glibc",
+                        "2.39",
+                        workerImage: null,
+                        glibcDependencies);
+                    break;
+                case "linux-musl":
+                    string muslDependency = runtime.Architecture switch
+                    {
+                        "x64" => "libc.musl-x86_64.so.1",
+                        "arm64" => "libc.musl-aarch64.so.1",
+                        _ => throw InvalidRuntimePolicy(runtime)
+                    };
+                    RequireRuntimePolicy(
+                        runtime,
+                        "3.23",
+                        "musl",
+                        "1.2.5",
+                        MuslWorkerImage,
+                        [muslDependency]);
+                    break;
+                case "macos":
+                    RequireRuntimePolicy(
+                        runtime,
+                        "15.0",
+                        libc: null,
+                        minimumLibcVersion: null,
+                        workerImage: null,
+                        macDependencies);
+                    break;
+                default:
+                    throw InvalidRuntimePolicy(runtime);
+            }
+        }
+    }
+
+    private static void RequireRuntimePolicy(
+        RuntimeDefinition runtime,
+        string minimumOsVersion,
+        string? libc,
+        string? minimumLibcVersion,
+        string? workerImage,
+        IReadOnlyList<string> systemDependencies)
+    {
+        IReadOnlyList<string>? actualDependencies = runtime.SystemDependencies;
+        if (!string.Equals(runtime.MinimumOsVersion, minimumOsVersion, StringComparison.Ordinal) ||
+            !string.Equals(runtime.Libc, libc, StringComparison.Ordinal) ||
+            !string.Equals(runtime.MinimumLibcVersion, minimumLibcVersion, StringComparison.Ordinal) ||
+            !string.Equals(runtime.WorkerImage, workerImage, StringComparison.Ordinal) ||
+            actualDependencies is null ||
+            actualDependencies.Count != actualDependencies.Distinct(StringComparer.Ordinal).Count() ||
+            !systemDependencies.ToHashSet(StringComparer.Ordinal).SetEquals(actualDependencies))
+        {
+            throw InvalidRuntimePolicy(runtime);
+        }
+    }
+
+    private static ReleaseFailureException InvalidRuntimePolicy(RuntimeDefinition runtime) =>
+        new(
+            "InvalidRuntimeCompatibilityPolicy",
+            $"Runtime Identifier '{runtime.Rid}' does not declare the approved minimum OS/ABI and system-library allowlist.");
 
     private static void ValidateHex(string value, int length, string label)
     {
