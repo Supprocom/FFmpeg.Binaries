@@ -424,6 +424,7 @@ jobs:
 
   publish:
     name: Publish frozen package family
+    if: github.event_name == 'workflow_dispatch'
     needs:
       - consumer-native
       - consumer-musl
