@@ -181,9 +181,9 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
             case "apk":
                 AddTextFileEvidence(evidence, "/etc/apk/repositories");
                 evidence.Add(await CaptureCommandAsync(
-                    "apk-policy",
+                    "apk-architecture",
                     "apk",
-                    ["policy"],
+                    ["--print-arch"],
                     workingDirectory,
                     cancellationToken).ConfigureAwait(false));
                 break;
