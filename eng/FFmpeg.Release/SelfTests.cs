@@ -145,6 +145,10 @@ internal static class SelfTests
                 "gnupg") == "2.4.9-r0",
             "unambiguous APK package identity parsing");
         Require(
+            NativeWorker.ParseApkOwnerIdentity(
+                "/usr/lib/libz.so.1 is owned by zlib-1.3.1-r2\n") == "zlib-1.3.1-r2",
+            "APK ownership evidence parsing");
+        Require(
             NativeWorker.ParseElfDependencies(
                 "0x1 (NEEDED) Shared library: [libm.so.6]\n0x1 (NEEDED) Shared library: [libc.so.6]\n")
                 .SequenceEqual(["libc.so.6", "libm.so.6"], StringComparer.Ordinal),
@@ -177,7 +181,7 @@ internal static class SelfTests
         Require(
             features.Contains("libx264") && features.Contains("zscale") && features.Contains("https"),
             "runtime feature inventory parsing");
-        Console.WriteLine("Self-tests passed: 35/35");
+        Console.WriteLine("Self-tests passed: 36/36");
     }
 
     private static void Require(bool condition, string label)

@@ -172,6 +172,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             TimeSpan.FromMinutes(3),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         EnsureSuccess(extract, "SourceExtractionFailed");
+        ApplySourceCompatibilityFixups(sourceRoot, runtime);
 
         IReadOnlyList<string> configureArguments = CreateConfigureArguments(flavor, runtime);
         var deterministicEnvironment = new Dictionary<string, string?>
@@ -347,6 +348,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 }
 
                 arguments.Add($"--extra-cflags={compilerFlags}");
+                arguments.Add("--extra-libs=-liconv");
                 break;
             default:
                 throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is not implemented.");
@@ -410,6 +412,40 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             cancellationToken: cancellationToken).ConfigureAwait(false);
         EnsureSuccess(result, "WorkerPathConversionFailed");
         return result.StandardOutput.Trim();
+    }
+
+    private static void ApplySourceCompatibilityFixups(string sourceRoot, RuntimeDefinition runtime)
+    {
+        if (runtime.Os != "windows" || runtime.Architecture != "arm64")
+        {
+            return;
+        }
+
+        string versionPath = Path.Combine(sourceRoot, "VERSION");
+        string relocatedVersionPath = Path.Combine(sourceRoot, "FFMPEG_VERSION");
+        string versionScriptPath = Path.Combine(sourceRoot, "ffbuild", "version.sh");
+        if (!File.Exists(versionPath) || File.Exists(relocatedVersionPath) || !File.Exists(versionScriptPath))
+        {
+            throw new ReleaseFailureException(
+                "SourceCompatibilityFixupFailed",
+                "The FFmpeg release-version inputs required by the Windows ARM64 source fixup are missing.");
+        }
+
+        const string originalCommand = "cat VERSION";
+        const string replacementCommand = "cat FFMPEG_VERSION";
+        string versionScript = File.ReadAllText(versionScriptPath);
+        if (versionScript.Split(originalCommand, StringSplitOptions.None).Length != 2)
+        {
+            throw new ReleaseFailureException(
+                "SourceCompatibilityFixupFailed",
+                "The FFmpeg version script no longer has the expected single release-version reference.");
+        }
+
+        File.Move(versionPath, relocatedVersionPath);
+        File.WriteAllText(
+            versionScriptPath,
+            versionScript.Replace(originalCommand, replacementCommand, StringComparison.Ordinal),
+            new UTF8Encoding(false));
     }
 
     private static void ValidateGeneratedConfiguration(string sourceRoot, FlavorDefinition flavor)
@@ -1075,16 +1111,21 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         EnsureSuccess(canonicalPath, "RuntimeDependencyOwnerMissing");
         CommandResult owner = await processRunner.RunAsync(
             "apk",
-            ["info", "-Wq", canonicalPath.StandardOutput.Trim()],
+            ["info", "-W", canonicalPath.StandardOutput.Trim()],
             payloadRoot,
             TimeSpan.FromSeconds(30),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         EnsureSuccess(owner, "RuntimeDependencyOwnerMissing");
-        string versionedPackage = owner.StandardOutput.Trim();
+        string? versionedPackage = ParseApkOwnerIdentity(owner.StandardOutput);
+        if (versionedPackage is null)
+        {
+            throw new ReleaseFailureException(
+                "RuntimeDependencyOwnerMissing",
+                $"The Alpine package owner of '{runtimePath}' could not be parsed.");
+        }
+
         Match packageIdentity = ApkPackageIdentityPattern.Match(versionedPackage);
-        if (!packageIdentity.Success ||
-            versionedPackage.Contains('\n', StringComparison.Ordinal) ||
-            versionedPackage.Contains('\r', StringComparison.Ordinal))
+        if (!packageIdentity.Success)
         {
             throw new ReleaseFailureException(
                 "RuntimeDependencyOwnerMissing",
@@ -1145,6 +1186,24 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             version,
             "apk",
             relativeLicensePath.Replace(Path.DirectorySeparatorChar, '/'));
+    }
+
+    internal static string? ParseApkOwnerIdentity(string evidence)
+    {
+        string[] lines = evidence.Split(
+            ['\r', '\n'],
+            StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (lines.Length != 1)
+        {
+            return null;
+        }
+
+        const string ownerMarker = " is owned by ";
+        int markerIndex = lines[0].LastIndexOf(ownerMarker, StringComparison.Ordinal);
+        string identity = markerIndex < 0
+            ? lines[0]
+            : lines[0][(markerIndex + ownerMarker.Length)..];
+        return ApkPackageIdentityPattern.IsMatch(identity) ? identity : null;
     }
 
     private async Task<BundledComponent> CaptureHomebrewDependencyComponentAsync(
@@ -1403,6 +1462,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                     runtime.MinimumLibcVersion,
                     toolchainEnvironment = runtime.Toolchain.EnvironmentIdentity,
                     toolchainSnapshot = runtime.Toolchain.RepositorySnapshot,
+                    sourceCompatibilityFixup = runtime.Os == "windows" && runtime.Architecture == "arm64"
+                        ? "Renamed upstream VERSION to FFMPEG_VERSION and redirected ffbuild/version.sh to avoid a case-insensitive collision with the C++ <version> header."
+                        : null,
                     buildRepository = "https://github.com/Supprocom/FFmpeg.Binaries"
                 },
                 IndentedJson) + "\n",

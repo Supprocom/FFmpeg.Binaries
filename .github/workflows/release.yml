@@ -334,7 +334,7 @@ jobs:
           for attempt in 1 2 3 4; do
             if pacboy -S --needed --noconfirm \
               SDL2:p aom:p bzip2:p dav1d:p fontconfig:p freetype:p fribidi:p gnutls:p \
-              harfbuzz:p lame:p libass:p libbluray:p libjxl:p libsoxr:p libssh:p \
+              harfbuzz:p lame:p libass:p libbluray:p libiconv:p libjxl:p libsoxr:p libssh:p \
               libtheora:p libvorbis:p libvpx:p libwebp:p libxml2:p openh264:p \
               openjpeg2:p opus:p pkgconf:p snappy:p speex:p srt:p xz:p zeromq:p \
               zimg:p zlib:p libx264:p rubberband:p vid.stab:p x265:p xvidcore:p; then
