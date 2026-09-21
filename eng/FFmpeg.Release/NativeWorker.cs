@@ -791,6 +791,13 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 }
 
                 File.Copy(source, destination, overwrite: false);
+                if (OperatingSystem.IsMacOS())
+                {
+                    File.SetUnixFileMode(
+                        destination,
+                        File.GetUnixFileMode(destination) | UnixFileMode.UserWrite);
+                }
+
                 components.Add(await CaptureHomebrewDependencyComponentAsync(
                     source,
                     name,
