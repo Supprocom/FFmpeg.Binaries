@@ -325,7 +325,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add(
                     $"--extra-cflags=-I{homebrewPrefix}/include {compilerFlags} -mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
                 arguments.Add(
-                    $"--extra-ldflags=-L{homebrewPrefix}/lib -Wl,-reproducible -Wl,-rpath,@loader_path -mmacosx-version-min={runtime.MinimumOsVersion}");
+                    $"--extra-ldflags=-L{homebrewPrefix}/lib -Wl,-reproducible -Wl,-no_uuid -Wl,-rpath,@loader_path -mmacosx-version-min={runtime.MinimumOsVersion}");
                 arguments.Add("--extra-libs=-liconv");
                 break;
             case "windows":
@@ -510,7 +510,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         foreach (string path in EnumerateNativeFiles(payloadRoot, runtime))
         {
             IReadOnlyList<string> arguments = runtime.Os == "macos"
-                ? ["-x", path]
+                ? ["-x", "-no_uuid", path]
                 : ["--strip-unneeded", path];
             CommandResult result = await processRunner.RunAsync(
                 "strip",
