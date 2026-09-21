@@ -662,27 +662,6 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         var components = new List<BundledComponent>();
         HashSet<string> systemDependencies = (runtime.SystemDependencies ?? [])
             .ToHashSet(StringComparer.Ordinal);
-        const string sdl3RuntimeName = "libSDL3.dylib";
-        if (File.Exists(Path.Combine(payloadRoot, "ffplay")))
-        {
-            string sdl3Source = Path.Combine(HomebrewPrefix(runtime), "lib", sdl3RuntimeName);
-            if (!File.Exists(sdl3Source))
-            {
-                throw new ReleaseFailureException(
-                    "BundledDependencyMissing",
-                    $"The Homebrew SDL2 compatibility runtime requires '{sdl3Source}', but it is not installed.");
-            }
-
-            string sdl3Destination = Path.Combine(payloadRoot, sdl3RuntimeName);
-            File.Copy(sdl3Source, sdl3Destination, overwrite: false);
-            MakeMacDependencyWritable(sdl3Destination);
-            components.Add(await CaptureHomebrewDependencyComponentAsync(
-                sdl3Source,
-                sdl3RuntimeName,
-                payloadRoot,
-                cancellationToken).ConfigureAwait(false));
-        }
-
         var pending = new Queue<string>(EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal));
         var inspected = new HashSet<string>(StringComparer.Ordinal);
         while (pending.TryDequeue(out string? path))
@@ -782,6 +761,27 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         var components = new List<BundledComponent>();
         HashSet<string> systemDependencies = (runtime.SystemDependencies ?? [])
             .ToHashSet(StringComparer.Ordinal);
+        const string sdl3RuntimeName = "libSDL3.dylib";
+        if (runtime.Os == "macos" && File.Exists(Path.Combine(payloadRoot, "ffplay")))
+        {
+            string sdl3Source = Path.Combine(HomebrewPrefix(runtime), "lib", sdl3RuntimeName);
+            if (!File.Exists(sdl3Source))
+            {
+                throw new ReleaseFailureException(
+                    "BundledDependencyMissing",
+                    $"The Homebrew SDL2 compatibility runtime requires '{sdl3Source}', but it is not installed.");
+            }
+
+            string sdl3Destination = Path.Combine(payloadRoot, sdl3RuntimeName);
+            File.Copy(sdl3Source, sdl3Destination, overwrite: false);
+            MakeMacDependencyWritable(sdl3Destination);
+            components.Add(await CaptureHomebrewDependencyComponentAsync(
+                sdl3Source,
+                sdl3RuntimeName,
+                payloadRoot,
+                cancellationToken).ConfigureAwait(false));
+        }
+
         var pending = new Queue<string>(EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal));
         var inspected = new HashSet<string>(StringComparer.Ordinal);
         while (pending.TryDequeue(out string? path))
