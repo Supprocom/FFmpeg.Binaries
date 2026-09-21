@@ -258,7 +258,7 @@ jobs:
           brew install \
             gnupg nasm pkgconf aom bzip2 dav1d fontconfig freetype fribidi gnutls \
             harfbuzz jpeg-xl lame libass libbluray libsoxr libssh theora libvorbis \
-            libvpx libxml2 openh264 openjpeg opus sdl2-compat snappy speex srt webp xz \
+            libvpx libxml2 openh264 openjpeg opus sdl2-compat sdl3 snappy speex srt webp xz \
             zeromq zimg libvidstab rubberband x264 x265 xvid
           {
             echo "PKG_CONFIG_PATH=$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix openssl@3)/lib/pkgconfig"

@@ -135,8 +135,11 @@ internal static class SelfTests
             musl.WorkerImage?.Contains("@sha256:", StringComparison.Ordinal) == true,
             "musl compatibility boundary");
         RuntimeDefinition mac = matrix.RuntimeIdentifiers.Single(item => item.Rid == "osx-x64");
+        RuntimeDefinition macArm64 = matrix.RuntimeIdentifiers.Single(item => item.Rid == "osx-arm64");
         Require(
             mac.MinimumOsVersion == "15.0" &&
+            mac.Toolchain.MediaPackages?.GetValueOrDefault("sdl3") == "3.4.14" &&
+            macArm64.Toolchain.MediaPackages?.GetValueOrDefault("sdl3") == "3.4.16" &&
             mac.SystemDependencies?.Contains("/usr/lib/libSystem.B.dylib", StringComparer.Ordinal) == true &&
             mac.SystemDependencies.Contains("/usr/lib/libexpat.1.dylib", StringComparer.Ordinal) &&
             mac.SystemDependencies.Contains(

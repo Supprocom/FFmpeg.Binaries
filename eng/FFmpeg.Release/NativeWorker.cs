@@ -662,6 +662,27 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         var components = new List<BundledComponent>();
         HashSet<string> systemDependencies = (runtime.SystemDependencies ?? [])
             .ToHashSet(StringComparer.Ordinal);
+        const string sdl3RuntimeName = "libSDL3.dylib";
+        if (File.Exists(Path.Combine(payloadRoot, "ffplay")))
+        {
+            string sdl3Source = Path.Combine(HomebrewPrefix(runtime), "lib", sdl3RuntimeName);
+            if (!File.Exists(sdl3Source))
+            {
+                throw new ReleaseFailureException(
+                    "BundledDependencyMissing",
+                    $"The Homebrew SDL2 compatibility runtime requires '{sdl3Source}', but it is not installed.");
+            }
+
+            string sdl3Destination = Path.Combine(payloadRoot, sdl3RuntimeName);
+            File.Copy(sdl3Source, sdl3Destination, overwrite: false);
+            MakeMacDependencyWritable(sdl3Destination);
+            components.Add(await CaptureHomebrewDependencyComponentAsync(
+                sdl3Source,
+                sdl3RuntimeName,
+                payloadRoot,
+                cancellationToken).ConfigureAwait(false));
+        }
+
         var pending = new Queue<string>(EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal));
         var inspected = new HashSet<string>(StringComparer.Ordinal);
         while (pending.TryDequeue(out string? path))
@@ -791,12 +812,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 }
 
                 File.Copy(source, destination, overwrite: false);
-                if (OperatingSystem.IsMacOS())
-                {
-                    File.SetUnixFileMode(
-                        destination,
-                        File.GetUnixFileMode(destination) | UnixFileMode.UserWrite);
-                }
+                MakeMacDependencyWritable(destination);
 
                 components.Add(await CaptureHomebrewDependencyComponentAsync(
                     source,
@@ -877,6 +893,14 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
     private static string HomebrewPrefix(RuntimeDefinition runtime) =>
         runtime.Architecture == "arm64" ? "/opt/homebrew" : "/usr/local";
+
+    private static void MakeMacDependencyWritable(string path)
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            File.SetUnixFileMode(path, File.GetUnixFileMode(path) | UnixFileMode.UserWrite);
+        }
+    }
 
     private static string? ResolveMacDependencySource(string dependency, RuntimeDefinition runtime)
     {
@@ -1554,6 +1578,14 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 path.EndsWith(".dylib", StringComparison.Ordinal)))
         {
             throw new ReleaseFailureException("SharedLibrariesMissing", "The worker payload contains no shared FFmpeg libraries.");
+        }
+
+        if (runtime.Os == "macos" && flavor.IncludeFfplay &&
+            !File.Exists(Path.Combine(payloadRoot, "libSDL3.dylib")))
+        {
+            throw new ReleaseFailureException(
+                "RequiredRuntimeMissing",
+                "The macOS FFplay payload is missing the SDL3 runtime required by sdl2-compat.");
         }
     }
 
