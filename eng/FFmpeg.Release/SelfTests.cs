@@ -138,6 +138,7 @@ internal static class SelfTests
         Require(
             mac.MinimumOsVersion == "15.0" &&
             mac.SystemDependencies?.Contains("/usr/lib/libSystem.B.dylib", StringComparer.Ordinal) == true &&
+            mac.SystemDependencies.Contains("/usr/lib/libexpat.1.dylib", StringComparer.Ordinal) &&
             mac.SystemDependencies.Contains(
                 "/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate",
                 StringComparer.Ordinal),
