@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -251,7 +250,6 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             runtime,
             version.SourceDateEpoch.Value,
             cancellationToken).ConfigureAwait(false);
-        NormalizeMacUuids(installedBin, version, flavor, runtime);
         await SignMacPayloadAsync(installedBin, runtime, cancellationToken).ConfigureAwait(false);
         string payloadRoot = Path.Combine(resultRoot, "payload");
         CopyTree(installedBin, payloadRoot);
@@ -327,7 +325,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add(
                     $"--extra-cflags=-I{homebrewPrefix}/include {compilerFlags} -mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
                 arguments.Add(
-                    $"--extra-ldflags=-L{homebrewPrefix}/lib -Wl,-reproducible -Wl,-rpath,@loader_path -mmacosx-version-min={runtime.MinimumOsVersion}");
+                    $"--extra-ldflags=-L{homebrewPrefix}/lib -Wl,-ld_classic -Wl,-rpath,@loader_path -mmacosx-version-min={runtime.MinimumOsVersion}");
                 arguments.Add("--extra-libs=-liconv");
                 break;
             case "windows":
@@ -524,118 +522,6 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             EnsureSuccess(result, "BinaryStripFailed");
         }
     }
-
-    private static void NormalizeMacUuids(
-        string payloadRoot,
-        VersionDefinition version,
-        FlavorDefinition flavor,
-        RuntimeDefinition runtime)
-    {
-        if (runtime.Os != "macos")
-        {
-            return;
-        }
-
-        foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal))
-        {
-            string relativePath = Path.GetRelativePath(payloadRoot, path)
-                .Replace(Path.DirectorySeparatorChar, '/');
-            byte[] uuid = SHA256.HashData(Encoding.UTF8.GetBytes(
-                $"{version.SourceCommit}\n{flavor.Name}\n{runtime.Rid}\n{relativePath}\n"))[..16];
-            uuid[6] = (byte)((uuid[6] & 0x0f) | 0x50);
-            uuid[8] = (byte)((uuid[8] & 0x3f) | 0x80);
-
-            byte[] image = File.ReadAllBytes(path);
-            int replacements = ReplaceMachOUuids(image, uuid);
-            if (replacements != 1)
-            {
-                throw new ReleaseFailureException(
-                    "MacUuidNormalizationFailed",
-                    $"Mach-O payload '{relativePath}' has {replacements} LC_UUID commands; exactly one is required.");
-            }
-
-            File.WriteAllBytes(path, image);
-        }
-    }
-
-    internal static int ReplaceMachOUuids(byte[] image, ReadOnlySpan<byte> uuid)
-    {
-        if (image.Length < 28 || uuid.Length != 16)
-        {
-            return 0;
-        }
-
-        uint magic = BinaryPrimitives.ReadUInt32LittleEndian(image.AsSpan(0, 4));
-        bool littleEndian;
-        int headerSize;
-        switch (magic)
-        {
-            case 0xfeedface:
-                littleEndian = true;
-                headerSize = 28;
-                break;
-            case 0xfeedfacf:
-                littleEndian = true;
-                headerSize = 32;
-                break;
-            case 0xcefaedfe:
-                littleEndian = false;
-                headerSize = 28;
-                break;
-            case 0xcffaedfe:
-                littleEndian = false;
-                headerSize = 32;
-                break;
-            default:
-                return 0;
-        }
-
-        uint commandCount = ReadMachOUInt32(image.AsSpan(16, 4), littleEndian);
-        uint commandBytes = ReadMachOUInt32(image.AsSpan(20, 4), littleEndian);
-        long commandEnd = (long)headerSize + commandBytes;
-        if (commandEnd > image.Length)
-        {
-            return 0;
-        }
-
-        int replacements = 0;
-        int offset = headerSize;
-        for (uint index = 0; index < commandCount; index++)
-        {
-            if (offset > commandEnd - 8)
-            {
-                return 0;
-            }
-
-            uint command = ReadMachOUInt32(image.AsSpan(offset, 4), littleEndian);
-            uint commandSize = ReadMachOUInt32(image.AsSpan(offset + 4, 4), littleEndian);
-            if (commandSize < 8 || (long)offset + commandSize > commandEnd)
-            {
-                return 0;
-            }
-
-            const uint LcUuid = 0x1b;
-            if (command == LcUuid)
-            {
-                if (commandSize < 24)
-                {
-                    return 0;
-                }
-
-                uuid.CopyTo(image.AsSpan(offset + 8, 16));
-                replacements++;
-            }
-
-            offset += checked((int)commandSize);
-        }
-
-        return replacements;
-    }
-
-    private static uint ReadMachOUInt32(ReadOnlySpan<byte> value, bool littleEndian) =>
-        littleEndian
-            ? BinaryPrimitives.ReadUInt32LittleEndian(value)
-            : BinaryPrimitives.ReadUInt32BigEndian(value);
 
     private async Task SignMacPayloadAsync(
         string payloadRoot,

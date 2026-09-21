@@ -290,6 +290,7 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
                 ("compiler", "clang", ["--version"]),
                 ("assembler", "xcrun", ["--find", "as"]),
                 ("linker", "xcrun", ["--find", "ld"]),
+                ("linker-classic", "xcrun", ["--find", "ld-classic"]),
                 ("strip", "xcrun", ["--find", "strip"]),
                 ("nasm", "nasm", ["-v"]),
                 ("make", "make", ["--version"]),

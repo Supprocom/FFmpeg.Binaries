@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
@@ -186,17 +185,6 @@ internal static class SelfTests
                 "cmd LC_SOURCE_VERSION\n    version 0.0\ncurrent version 63.1.0\n")
                 .SequenceEqual(["15.0"], StringComparer.Ordinal),
             "Mach-O minimum-OS parsing");
-        byte[] machO = new byte[56];
-        BinaryPrimitives.WriteUInt32LittleEndian(machO.AsSpan(0, 4), 0xfeedfacf);
-        BinaryPrimitives.WriteUInt32LittleEndian(machO.AsSpan(16, 4), 1);
-        BinaryPrimitives.WriteUInt32LittleEndian(machO.AsSpan(20, 4), 24);
-        BinaryPrimitives.WriteUInt32LittleEndian(machO.AsSpan(32, 4), 0x1b);
-        BinaryPrimitives.WriteUInt32LittleEndian(machO.AsSpan(36, 4), 24);
-        byte[] deterministicUuid = Enumerable.Range(0, 16).Select(value => (byte)value).ToArray();
-        Require(
-            NativeWorker.ReplaceMachOUuids(machO, deterministicUuid) == 1 &&
-            machO.AsSpan(40, 16).SequenceEqual(deterministicUuid),
-            "Mach-O deterministic UUID replacement");
         Require(
             NativeWorker.CompareDottedVersions("15.0.0", "15.0") == 0 &&
             NativeWorker.CompareDottedVersions("2.39", "2.35") > 0,
@@ -209,7 +197,7 @@ internal static class SelfTests
         Require(
             features.Contains("libx264") && features.Contains("zscale") && features.Contains("https"),
             "runtime feature inventory parsing");
-        Console.WriteLine("Self-tests passed: 38/38");
+        Console.WriteLine("Self-tests passed: 37/37");
     }
 
     private static void Require(bool condition, string label)
