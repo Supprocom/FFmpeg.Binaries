@@ -257,7 +257,7 @@ jobs:
         run: |
           brew install \
             gnupg nasm pkgconf aom bzip2 dav1d fontconfig freetype fribidi gnutls \
-            harfbuzz jpeg-xl lame libass libbluray libsoxr libssh libtheora libvorbis \
+            harfbuzz jpeg-xl lame libass libbluray libsoxr libssh theora libvorbis \
             libvpx libxml2 openh264 openjpeg opus sdl2-compat snappy speex srt webp xz \
             zeromq zimg libvidstab rubberband x264 x265 xvid
           {
@@ -330,13 +330,21 @@ jobs:
       - name: Install current 64-bit media stack
         if: matrix.rid != 'win-x86'
         shell: msys2 {0}
-        run: >-
-          pacboy -S --needed --noconfirm
-          SDL2:p aom:p bzip2:p dav1d:p fontconfig:p freetype:p fribidi:p gnutls:p
-          harfbuzz:p lame:p libass:p libbluray:p libjxl:p libsoxr:p libssh:p
-          libtheora:p libvorbis:p libvpx:p libwebp:p libxml2:p openh264:p
-          openjpeg2:p opus:p pkgconf:p snappy:p speex:p srt:p xz:p zeromq:p
-          zimg:p zlib:p libx264:p rubberband:p vid.stab:p x265:p xvidcore:p
+        run: |
+          for attempt in 1 2 3 4; do
+            if pacboy -S --needed --noconfirm \
+              SDL2:p aom:p bzip2:p dav1d:p fontconfig:p freetype:p fribidi:p gnutls:p \
+              harfbuzz:p lame:p libass:p libbluray:p libjxl:p libsoxr:p libssh:p \
+              libtheora:p libvorbis:p libvpx:p libwebp:p libxml2:p openh264:p \
+              openjpeg2:p opus:p pkgconf:p snappy:p speex:p srt:p xz:p zeromq:p \
+              zimg:p zlib:p libx264:p rubberband:p vid.stab:p x265:p xvidcore:p; then
+              break
+            fi
+            if [[ "${attempt}" == 4 ]]; then
+              exit 1
+            fi
+            sleep 5
+          done
 
       - name: Install SHA-locked archived win-x86 media stack
         if: matrix.rid == 'win-x86'

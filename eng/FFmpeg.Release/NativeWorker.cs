@@ -34,6 +34,10 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         @"\bVersion\s+(?<version>\d+\.\d+(?:\.\d+)?)\b",
         RegexOptions.CultureInvariant,
         TimeSpan.FromSeconds(1));
+    private static readonly Regex ApkPackageIdentityPattern = new(
+        @"^(?<name>.+)-(?<version>\d.+)$",
+        RegexOptions.CultureInvariant,
+        TimeSpan.FromSeconds(1));
     private const string FixedPrefix = "/opt/supprocom/ffmpeg";
 
     public async Task<string> BuildAsync(
@@ -1076,16 +1080,19 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             TimeSpan.FromSeconds(30),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         EnsureSuccess(owner, "RuntimeDependencyOwnerMissing");
-        string package = owner.StandardOutput.Trim();
-        if (package.Length == 0 ||
-            package.Contains('\n', StringComparison.Ordinal) ||
-            package.Contains('\r', StringComparison.Ordinal))
+        string versionedPackage = owner.StandardOutput.Trim();
+        Match packageIdentity = ApkPackageIdentityPattern.Match(versionedPackage);
+        if (!packageIdentity.Success ||
+            versionedPackage.Contains('\n', StringComparison.Ordinal) ||
+            versionedPackage.Contains('\r', StringComparison.Ordinal))
         {
             throw new ReleaseFailureException(
                 "RuntimeDependencyOwnerMissing",
                 $"The Alpine package owner of '{runtimePath}' could not be parsed.");
         }
 
+        string package = packageIdentity.Groups["name"].Value;
+        string version = packageIdentity.Groups["version"].Value;
         CommandResult identity = await processRunner.RunAsync(
             "apk",
             ["info", "-v", package],
@@ -1093,9 +1100,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             TimeSpan.FromSeconds(30),
             cancellationToken: cancellationToken).ConfigureAwait(false);
         EnsureSuccess(identity, "RuntimeDependencyOwnerMissing");
-        string versionedPackage = identity.StandardOutput.Trim();
-        string prefix = package + "-";
-        if (!versionedPackage.StartsWith(prefix, StringComparison.Ordinal))
+        if (!identity.StandardOutput
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Contains(versionedPackage, StringComparer.Ordinal))
         {
             throw new ReleaseFailureException(
                 "RuntimeDependencyOwnerMissing",
@@ -1135,7 +1142,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         return new BundledComponent(
             fileName,
             package,
-            versionedPackage[prefix.Length..],
+            version,
             "apk",
             relativeLicensePath.Replace(Path.DirectorySeparatorChar, '/'));
     }
@@ -1724,7 +1731,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 throw new ReleaseFailureException("UnsupportedWorkerOS", $"Worker OS '{runtime.Os}' is unsupported.");
             }
 
-            if (dependencies.Length == 0)
+            if (dependencies.Length == 0 && IsFfmpegPayloadFile(Path.GetFileName(path), runtime))
             {
                 throw new ReleaseFailureException(
                     "DynamicDependencyInspectionInvalid",
@@ -1732,6 +1739,11 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             }
 
             evidenceLines.Add(Path.GetFileName(path) + ":");
+            if (dependencies.Length == 0)
+            {
+                evidenceLines.Add("  none");
+            }
+
             foreach (string dependency in dependencies)
             {
                 string bundledName = runtime.Os == "macos"
@@ -2792,11 +2804,21 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
     {
         if (result.ExitCode != 0)
         {
-            string diagnostic = string.Join(
+            string standardError = string.Join(
                 '\n',
-                (result.StandardError + "\n" + result.StandardOutput)
+                result.StandardError
+                    .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .TakeLast(40));
+            string standardOutput = string.Join(
+                '\n',
+                result.StandardOutput
                     .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .TakeLast(20));
+            string diagnostic = standardError.Length == 0
+                ? standardOutput
+                : standardOutput.Length == 0
+                    ? standardError
+                    : "stderr:\n" + standardError + "\nstdout tail:\n" + standardOutput;
             throw new ReleaseFailureException(code, $"A required native-worker command failed.\n{diagnostic}");
         }
     }

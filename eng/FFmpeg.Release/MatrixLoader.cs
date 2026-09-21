@@ -357,7 +357,7 @@ internal static class MatrixLoader
                 case "linux":
                     IReadOnlyList<string> approvedGlibcDependencies = runtime.Architecture == "arm64"
                         ? ["ld-linux-aarch64.so.1", .. glibcDependencies]
-                        : glibcDependencies;
+                        : ["ld-linux-x86-64.so.2", .. glibcDependencies];
                     RequireRuntimePolicy(
                         runtime,
                         "24.04",
