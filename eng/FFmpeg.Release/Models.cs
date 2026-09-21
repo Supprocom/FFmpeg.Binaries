@@ -7,6 +7,7 @@ internal sealed record ReleaseMatrix(
     RepositoryDefinition Repository,
     IReadOnlyList<FeedDefinition> Feeds,
     IReadOnlyList<VersionDefinition> Versions,
+    IReadOnlyList<ReleaseDefinition> Releases,
     IReadOnlyList<RuntimeDefinition> RuntimeIdentifiers,
     IReadOnlyList<FlavorDefinition> Flavors);
 
@@ -28,6 +29,13 @@ internal sealed record VersionDefinition(
     string? TagObject = null,
     string? SourceCommit = null);
 
+internal sealed record ReleaseDefinition(
+    string PackageVersion,
+    string SourceVersion,
+    string Flavor,
+    string Status,
+    bool Default = false);
+
 internal sealed record RuntimeDefinition(
     string Rid,
     string Os,
@@ -45,7 +53,10 @@ internal sealed record ToolchainDefinition(
     string EnvironmentIdentity,
     string RepositorySnapshot,
     string PackageManager,
-    IReadOnlyDictionary<string, string> Packages);
+    IReadOnlyDictionary<string, string> Packages,
+    IReadOnlyDictionary<string, string>? MediaPackages = null,
+    IReadOnlyDictionary<string, string>? FullPackages = null,
+    string? PackageLockSha256 = null);
 
 internal sealed record ToolchainProvenance(
     int SchemaVersion,
@@ -56,14 +67,28 @@ internal sealed record ToolchainProvenance(
     IReadOnlyDictionary<string, string> ApprovedPackages,
     IReadOnlyList<string> InstalledPackages,
     IReadOnlyList<string> RepositoryEvidence,
-    IReadOnlyList<string> ToolEvidence);
+    IReadOnlyList<string> ToolEvidence,
+    string? PackageLockSha256 = null);
+
+internal sealed record BundledComponent(
+    string FileName,
+    string PackageName,
+    string PackageVersion,
+    string PackageManager,
+    string LicensePath);
 
 internal sealed record FlavorDefinition(
     string Name,
     string FacadePackageId,
     string CorePackageId,
     string SourcePackageId,
-    IReadOnlyList<string> ConfigureArguments);
+    string LicenseExpression,
+    bool IncludeFfplay,
+    IReadOnlyList<string> ConfigureArguments,
+    IReadOnlyList<string> RequiredEncoders,
+    IReadOnlyList<string> RequiredDecoders,
+    IReadOnlyList<string> RequiredFilters,
+    IReadOnlyList<string> RequiredProtocols);
 
 internal sealed record ReleasePlan(
     int SchemaVersion,
@@ -111,7 +136,8 @@ internal sealed record WorkerFile(
 internal sealed record WorkerManifest(
     int SchemaVersion,
     string PlanSha256,
-    string Version,
+    string SourceVersion,
+    string PackageVersion,
     string SourceCommit,
     string ArchiveSha256,
     string Flavor,
@@ -142,7 +168,9 @@ internal sealed record FrozenPackage(
 internal sealed record FrozenReleaseManifest(
     int SchemaVersion,
     string PlanSha256,
-    string Version,
+    string SourceVersion,
+    string PackageVersion,
+    string Flavor,
     string ReleaseProgramCommit,
     string MatrixSha256,
     bool CompleteRuntimeMatrix,
@@ -155,7 +183,9 @@ internal sealed record ConsumerAttestation(
     int SchemaVersion,
     string PlanSha256,
     string ReleaseManifestSha256,
-    string Version,
+    string SourceVersion,
+    string PackageVersion,
+    string Flavor,
     string RuntimeIdentifier,
     IReadOnlyList<string> Scenarios,
     DateTimeOffset CompletedUtc);
@@ -170,6 +200,7 @@ internal sealed record ConsumerAttestation(
 [JsonSerializable(typeof(PersistedPlan))]
 [JsonSerializable(typeof(SourceVerificationResult))]
 [JsonSerializable(typeof(ToolchainProvenance))]
+[JsonSerializable(typeof(List<BundledComponent>))]
 [JsonSerializable(typeof(WorkerManifest))]
 [JsonSerializable(typeof(List<WorkerFile>))]
 [JsonSerializable(typeof(FrozenReleaseManifest))]

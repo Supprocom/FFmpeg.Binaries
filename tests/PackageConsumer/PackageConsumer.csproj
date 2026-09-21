@@ -8,7 +8,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <TestRid Condition="'$(TestRid)' == ''">linux-x64</TestRid>
     <SupprocomPackageId Condition="'$(SupprocomPackageId)' == ''">Supprocom.FFmpeg.Binaries.$(TestRid)</SupprocomPackageId>
-    <SupprocomPackageVersion Condition="'$(SupprocomPackageVersion)' == ''">9.0.2</SupprocomPackageVersion>
+    <SupprocomPackageVersion Condition="'$(SupprocomPackageVersion)' == ''">9.0.2.1</SupprocomPackageVersion>
   </PropertyGroup>
 
   <ItemGroup>

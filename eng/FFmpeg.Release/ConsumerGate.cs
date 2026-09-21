@@ -18,6 +18,8 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
         string matrixHash,
         string releaseCommit,
         VersionDefinition version,
+        ReleaseDefinition releaseDefinition,
+        FlavorDefinition flavor,
         RuntimeDefinition runtime,
         string packageRoot,
         string testRoot,
@@ -31,6 +33,8 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             matrixHash,
             releaseCommit,
             version,
+            releaseDefinition,
+            flavor,
             packages,
             cancellationToken).ConfigureAwait(false);
 
@@ -45,6 +49,8 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             ["NUGET_XMLDOC_MODE"] = "skip",
             ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
             ["DOTNET_NOLOGO"] = "1",
+            ["SUPPROCOM_TEST_FLAVOR"] = flavor.Name,
+            ["SUPPROCOM_TEST_PACKAGE_VERSION"] = releaseDefinition.PackageVersion,
             ["SUPPROCOM_TEST_RID"] = runtime.Rid,
             ["SUPPROCOM_NUGET_CONFIG"] = nugetConfig
         };
@@ -56,7 +62,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             root,
             environment,
             runtime,
-            version.Version,
+            releaseDefinition.PackageVersion,
             runtimePackage,
             "runtime-self-contained",
             "net10.0",
@@ -70,7 +76,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             root,
             environment,
             runtime,
-            version.Version,
+            releaseDefinition.PackageVersion,
             "Supprocom.FFmpeg.Binaries",
             "facade-framework-dependent",
             "net10.0",
@@ -85,7 +91,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             root,
             environment,
             runtime,
-            version.Version,
+            releaseDefinition.PackageVersion,
             "FFMpegCoreConsumer",
             cancellationToken).ConfigureAwait(false);
         scenarios.Add("ffmpegcore-5.4.0");
@@ -95,7 +101,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             root,
             environment,
             runtime,
-            version.Version,
+            releaseDefinition.PackageVersion,
             "XabeConsumer",
             cancellationToken).ConfigureAwait(false);
         scenarios.Add("xabe-ffmpeg-6.0.2");
@@ -107,7 +113,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 root,
                 environment,
                 runtime,
-                version.Version,
+                releaseDefinition.PackageVersion,
                 cancellationToken).ConfigureAwait(false);
             scenarios.Add("fixed-output-directory-contract");
             await PublishAndRunAsync(
@@ -116,7 +122,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 root,
                 environment,
                 runtime,
-                version.Version,
+                releaseDefinition.PackageVersion,
                 "Supprocom.FFmpeg.Binaries",
                 "facade-net8-self-contained",
                 "net8.0",
@@ -130,7 +136,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 root,
                 environment,
                 runtime,
-                version.Version,
+                releaseDefinition.PackageVersion,
                 "Supprocom.FFmpeg.Binaries",
                 "facade-trimmed",
                 "net10.0",
@@ -144,7 +150,7 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 root,
                 environment,
                 runtime,
-                version.Version,
+                releaseDefinition.PackageVersion,
                 "Supprocom.FFmpeg.Binaries",
                 "facade-single-file",
                 "net10.0",
@@ -162,17 +168,19 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
                 root,
                 environment,
                 runtime,
-                version.Version,
+                releaseDefinition.PackageVersion,
                 cancellationToken).ConfigureAwait(false);
             scenarios.Add("sdk-style-net48-build");
         }
 
         string releaseManifestPath = Path.Combine(packages, "release-manifest.json");
         var attestation = new ConsumerAttestation(
-            1,
+            2,
             release.PlanSha256,
             await HashFileAsync(releaseManifestPath, cancellationToken).ConfigureAwait(false),
             version.Version,
+            releaseDefinition.PackageVersion,
+            flavor.Name,
             runtime.Rid,
             scenarios,
             DateTimeOffset.UtcNow);
@@ -432,6 +440,8 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
         string matrixHash,
         string releaseCommit,
         VersionDefinition version,
+        ReleaseDefinition releaseDefinition,
+        FlavorDefinition flavor,
         string packageRoot,
         CancellationToken cancellationToken)
     {
@@ -447,7 +457,9 @@ internal sealed class ConsumerGate(ProcessRunner processRunner)
             ?? throw new ReleaseFailureException("FrozenManifestInvalid", "The frozen release manifest is empty.");
         int expectedCount = matrix.RuntimeIdentifiers.Count + 3;
         if (!manifest.CompleteRuntimeMatrix ||
-            !manifest.Version.Equals(version.Version, StringComparison.Ordinal) ||
+            !manifest.SourceVersion.Equals(version.Version, StringComparison.Ordinal) ||
+            !manifest.PackageVersion.Equals(releaseDefinition.PackageVersion, StringComparison.Ordinal) ||
+            !manifest.Flavor.Equals(flavor.Name, StringComparison.Ordinal) ||
             !manifest.MatrixSha256.Equals(matrixHash, StringComparison.Ordinal) ||
             !manifest.ReleaseProgramCommit.Equals(releaseCommit, StringComparison.Ordinal) ||
             manifest.Packages.Count != expectedCount)

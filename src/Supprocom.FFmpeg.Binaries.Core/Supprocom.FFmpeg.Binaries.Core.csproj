@@ -6,11 +6,11 @@
     <LangVersion>latest</LangVersion>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <PackageId>Supprocom.FFmpeg.Binaries.Core</PackageId>
-    <Version Condition="'$(Version)' == ''">9.0.2</Version>
+    <Version Condition="'$(Version)' == ''">9.0.2.1</Version>
     <Authors>Supprocom</Authors>
     <Company>Supprocom</Company>
     <Description>Common MSBuild deployment behavior and path discovery for Supprocom FFmpeg binary packages.</Description>
-    <PackageLicenseExpression>LGPL-2.1-or-later</PackageLicenseExpression>
+    <PackageLicenseExpression Condition="'$(PackageLicenseExpression)' == ''">GPL-3.0-or-later</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageProjectUrl>https://github.com/Supprocom/FFmpeg.Binaries</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Supprocom/FFmpeg.Binaries.git</RepositoryUrl>
@@ -23,7 +23,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Include="../../COPYING.GPLv2" Pack="true" PackagePath="licenses/" />
+    <None Include="../../COPYING.GPLv3" Pack="true" PackagePath="licenses/" />
     <None Include="../../COPYING.LGPLv2.1" Pack="true" PackagePath="licenses/" />
+    <None Include="../../COPYING.LGPLv3" Pack="true" PackagePath="licenses/" />
     <None Include="../../packaging/README.md" Pack="true" PackagePath="/" />
     <None Include="buildTransitive/Supprocom.FFmpeg.Binaries.Core.props" Pack="true" PackagePath="buildTransitive/" />
     <None Include="buildTransitive/Supprocom.FFmpeg.Binaries.Core.targets" Pack="true" PackagePath="buildTransitive/" />

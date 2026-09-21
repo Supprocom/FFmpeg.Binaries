@@ -53,6 +53,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         ToolchainProvenance toolchain = await new ToolchainInspector(processRunner).InspectAndValidateAsync(
             repositoryRoot,
             runtime,
+            flavor,
             cancellationToken).ConfigureAwait(false);
         string workerRoot = Path.Combine(planDirectory, "workers", runtime.Rid);
         string comparisonRoot = Path.Combine(workerRoot, "independent-builds");
@@ -100,9 +101,10 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             "BUILD-METADATA/toolchain-provenance.json",
             StringComparison.Ordinal)).Sha256;
         var manifest = new WorkerManifest(
-            3,
+            4,
             planHash,
             plan.Version,
+            plan.PackageVersion,
             plan.SourceCommit,
             plan.ArchiveSha256,
             flavor.Name,
@@ -194,7 +196,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             deterministicEnvironment,
             cancellationToken).ConfigureAwait(false);
         EnsureSuccess(configure, "FFmpegConfigureFailed");
-        ValidateGeneratedConfiguration(sourceRoot);
+        ValidateGeneratedConfiguration(sourceRoot, flavor);
 
         int parallelism = Math.Max(1, Math.Min(Environment.ProcessorCount, 8));
         CommandResult build = await processRunner.RunAsync(
@@ -233,13 +235,17 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
         NormalizeLinks(installedBin);
         PruneRedundantLibraryAliases(installedBin, runtime);
+        IReadOnlyList<BundledComponent> bundledComponents = await BundleRuntimeDependenciesAsync(
+            installedBin,
+            runtime,
+            cancellationToken).ConfigureAwait(false);
         await NormalizeRuntimeSearchPathAsync(installedBin, runtime, cancellationToken).ConfigureAwait(false);
         await StripBinariesAsync(
             installedBin,
             runtime,
             version.SourceDateEpoch.Value,
             cancellationToken).ConfigureAwait(false);
-        await BundleWindowsToolchainRuntimeAsync(installedBin, runtime, cancellationToken).ConfigureAwait(false);
+        await SignMacPayloadAsync(installedBin, runtime, cancellationToken).ConfigureAwait(false);
         string payloadRoot = Path.Combine(resultRoot, "payload");
         CopyTree(installedBin, payloadRoot);
         AddComplianceFiles(
@@ -250,15 +256,17 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             flavor,
             runtime,
             toolchain,
+            bundledComponents,
             configureArguments);
-        ValidateExpectedPayload(payloadRoot, runtime);
+        ValidateExpectedPayload(payloadRoot, flavor, runtime);
         string architectureEvidence = await InspectArchitectureAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         string dependencyEvidence = await InspectDynamicDependenciesAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         string abiEvidence = await InspectAbiCompatibilityAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         string hardeningEvidence = await InspectHardeningAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
         NormalizePayloadPermissions(payloadRoot);
         RejectAbsoluteBuildPath(payloadRoot, workRoot);
-        await RunSmokeTestAsync(payloadRoot, runtime, cancellationToken).ConfigureAwait(false);
+        await ValidateFeatureContractAsync(payloadRoot, flavor, runtime, cancellationToken).ConfigureAwait(false);
+        await RunSmokeTestAsync(payloadRoot, flavor, runtime, cancellationToken).ConfigureAwait(false);
         return new BuildOutcome(
             payloadRoot,
             configureArguments,
@@ -303,6 +311,10 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add($"--arch={ToConfigureArchitecture(runtime.Architecture)}");
                 arguments.Add("--enable-pthreads");
                 arguments.Add("--cc=clang");
+                arguments.Add("--enable-audiotoolbox");
+                arguments.Add("--enable-coreimage");
+                arguments.Add("--enable-metal");
+                arguments.Add("--enable-videotoolbox");
                 arguments.Add("--install-name-dir=@rpath");
                 arguments.Add(
                     $"--extra-cflags={compilerFlags} -mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
@@ -312,6 +324,10 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add("--target-os=mingw32");
                 arguments.Add($"--arch={ToConfigureArchitecture(runtime.Architecture)}");
                 arguments.Add("--enable-w32threads");
+                arguments.Add("--enable-d3d11va");
+                arguments.Add("--enable-d3d12va");
+                arguments.Add("--enable-dxva2");
+                arguments.Add("--enable-mediafoundation");
                 if (runtime.Architecture == "arm64")
                 {
                     arguments.Add("--cc=clang");
@@ -392,18 +408,27 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         return result.StandardOutput.Trim();
     }
 
-    private static void ValidateGeneratedConfiguration(string sourceRoot)
+    private static void ValidateGeneratedConfiguration(string sourceRoot, FlavorDefinition flavor)
     {
         HashSet<string> config = File.ReadLines(Path.Combine(sourceRoot, "ffbuild", "config.mak"))
             .ToHashSet(StringComparer.Ordinal);
         if (config.Contains("CONFIG_NONFREE=yes") ||
-            config.Contains("CONFIG_GPL=yes") ||
             !config.Contains("CONFIG_SHARED=yes") ||
             config.Contains("CONFIG_STATIC=yes"))
         {
             throw new ReleaseFailureException(
                 "GeneratedLicenseConfigurationInvalid",
-                "The generated FFmpeg configuration crossed the approved LGPL/shared-library boundary.");
+                "The generated FFmpeg configuration crossed the approved redistributable shared-library boundary.");
+        }
+
+        bool gplEnabled = config.Contains("CONFIG_GPL=yes");
+        bool expectedGpl = flavor.Name.Equals("full", StringComparison.Ordinal);
+        if (gplEnabled != expectedGpl ||
+            (expectedGpl && !config.Contains("CONFIG_VERSION3=yes")))
+        {
+            throw new ReleaseFailureException(
+                "GeneratedLicenseConfigurationInvalid",
+                $"The generated FFmpeg configuration does not match the declared '{flavor.Name}' license family.");
         }
     }
 
@@ -455,6 +480,36 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         }
     }
 
+    private async Task SignMacPayloadAsync(
+        string payloadRoot,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        if (runtime.Os != "macos")
+        {
+            return;
+        }
+
+        foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal))
+        {
+            CommandResult sign = await processRunner.RunAsync(
+                "codesign",
+                ["--force", "--sign", "-", "--timestamp=none", path],
+                payloadRoot,
+                TimeSpan.FromSeconds(60),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(sign, "MacAdHocSigningFailed");
+
+            CommandResult verify = await processRunner.RunAsync(
+                "codesign",
+                ["--verify", "--strict", path],
+                payloadRoot,
+                TimeSpan.FromSeconds(60),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(verify, "MacAdHocSigningFailed");
+        }
+    }
+
     private static IEnumerable<string> EnumerateNativeFiles(string payloadRoot, RuntimeDefinition runtime)
     {
         string executableSuffix = runtime.Os == "windows" ? ".exe" : string.Empty;
@@ -463,6 +518,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             string name = Path.GetFileName(path);
             if (name.Equals("ffmpeg" + executableSuffix, StringComparison.OrdinalIgnoreCase) ||
                 name.Equals("ffprobe" + executableSuffix, StringComparison.OrdinalIgnoreCase) ||
+                name.Equals("ffplay" + executableSuffix, StringComparison.OrdinalIgnoreCase) ||
                 name.Contains(".so", StringComparison.Ordinal) ||
                 name.EndsWith(".dylib", StringComparison.Ordinal) ||
                 name.EndsWith(".dll", StringComparison.OrdinalIgnoreCase))
@@ -472,16 +528,39 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         }
     }
 
-    private async Task BundleWindowsToolchainRuntimeAsync(
+    private async Task<IReadOnlyList<BundledComponent>> BundleRuntimeDependenciesAsync(
         string payloadRoot,
         RuntimeDefinition runtime,
         CancellationToken cancellationToken)
     {
-        if (runtime.Os != "windows")
+        return runtime.Os switch
         {
-            return;
-        }
+            "windows" => await BundleWindowsDependenciesAsync(
+                payloadRoot,
+                runtime,
+                cancellationToken).ConfigureAwait(false),
+            "linux" or "linux-musl" => await BundleElfDependenciesAsync(
+                payloadRoot,
+                runtime,
+                cancellationToken).ConfigureAwait(false),
+            "macos" => await BundleMacDependenciesAsync(
+                payloadRoot,
+                runtime,
+                cancellationToken).ConfigureAwait(false),
+            _ => throw new ReleaseFailureException(
+                "UnsupportedWorkerOS",
+                $"Worker OS '{runtime.Os}' is unsupported.")
+        };
+    }
 
+    private async Task<IReadOnlyList<BundledComponent>> BundleWindowsDependenciesAsync(
+        string payloadRoot,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        var components = new List<BundledComponent>();
+        HashSet<string> systemDependencies = (runtime.SystemDependencies ?? [])
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var pending = new Queue<string>(
             EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.OrdinalIgnoreCase));
         var inspected = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -497,7 +576,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                          payloadRoot,
                          cancellationToken).ConfigureAwait(false))
             {
-                if (!IsBundledWindowsToolchainRuntime(dependency))
+                if (systemDependencies.Contains(dependency))
                 {
                     continue;
                 }
@@ -520,10 +599,244 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                     payloadRoot,
                     cancellationToken).ConfigureAwait(false);
                 File.Copy(source, destination, overwrite: false);
-                CopyWindowsRuntimeLicenses(source, dependency, payloadRoot);
+                components.Add(await CopyWindowsDependencyLicensesAsync(
+                    source,
+                    dependency,
+                    payloadRoot,
+                    cancellationToken).ConfigureAwait(false));
                 pending.Enqueue(destination);
             }
         }
+
+        return components.OrderBy(item => item.FileName, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private async Task<IReadOnlyList<BundledComponent>> BundleElfDependenciesAsync(
+        string payloadRoot,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        var components = new List<BundledComponent>();
+        HashSet<string> systemDependencies = (runtime.SystemDependencies ?? [])
+            .ToHashSet(StringComparer.Ordinal);
+        var pending = new Queue<string>(EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal));
+        var inspected = new HashSet<string>(StringComparer.Ordinal);
+        while (pending.TryDequeue(out string? path))
+        {
+            if (!inspected.Add(path))
+            {
+                continue;
+            }
+
+            CommandResult readElf = await processRunner.RunAsync(
+                "readelf",
+                ["-W", "-d", path],
+                payloadRoot,
+                TimeSpan.FromSeconds(60),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(readElf, "DynamicDependencyInspectionFailed");
+            string[] dependencies = ParseElfDependencies(readElf.StandardOutput);
+            IReadOnlyDictionary<string, string> resolved = await ResolveElfDependenciesAsync(
+                path,
+                payloadRoot,
+                cancellationToken).ConfigureAwait(false);
+            foreach (string dependency in dependencies)
+            {
+                string destination = Path.Combine(payloadRoot, dependency);
+                if (File.Exists(destination) || systemDependencies.Contains(dependency))
+                {
+                    continue;
+                }
+
+                if (!resolved.TryGetValue(dependency, out string? source) || !File.Exists(source))
+                {
+                    throw new ReleaseFailureException(
+                        "BundledDependencyMissing",
+                        $"ELF dependency '{dependency}' required by '{Path.GetFileName(path)}' could not be resolved.");
+                }
+
+                File.Copy(source, destination, overwrite: false);
+                components.Add(await CaptureElfDependencyComponentAsync(
+                    source,
+                    dependency,
+                    payloadRoot,
+                    runtime,
+                    cancellationToken).ConfigureAwait(false));
+                pending.Enqueue(destination);
+            }
+        }
+
+        return components.OrderBy(item => item.FileName, StringComparer.Ordinal).ToArray();
+    }
+
+    private async Task<IReadOnlyDictionary<string, string>> ResolveElfDependenciesAsync(
+        string path,
+        string payloadRoot,
+        CancellationToken cancellationToken)
+    {
+        var environment = new Dictionary<string, string?>
+        {
+            ["LD_LIBRARY_PATH"] = payloadRoot
+        };
+        CommandResult result = await processRunner.RunAsync(
+            "ldd",
+            [path],
+            payloadRoot,
+            TimeSpan.FromSeconds(60),
+            environment,
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(result, "DynamicDependencyResolutionFailed");
+        var dependencies = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (string line in (result.StandardOutput + result.StandardError).Split(
+                     ['\r', '\n'],
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int arrow = line.IndexOf("=>", StringComparison.Ordinal);
+            if (arrow < 0)
+            {
+                continue;
+            }
+
+            string name = line[..arrow].Trim();
+            string value = line[(arrow + 2)..].Trim();
+            int metadata = value.IndexOf(" (", StringComparison.Ordinal);
+            string resolved = metadata < 0 ? value : value[..metadata];
+            if (name.Length != 0 && Path.IsPathFullyQualified(resolved))
+            {
+                dependencies[name] = resolved;
+            }
+        }
+
+        return dependencies;
+    }
+
+    private async Task<IReadOnlyList<BundledComponent>> BundleMacDependenciesAsync(
+        string payloadRoot,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        var components = new List<BundledComponent>();
+        HashSet<string> systemDependencies = (runtime.SystemDependencies ?? [])
+            .ToHashSet(StringComparer.Ordinal);
+        var pending = new Queue<string>(EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal));
+        var inspected = new HashSet<string>(StringComparer.Ordinal);
+        while (pending.TryDequeue(out string? path))
+        {
+            if (!inspected.Add(path))
+            {
+                continue;
+            }
+
+            foreach (string dependency in await ReadMacDependenciesAsync(
+                         path,
+                         payloadRoot,
+                         cancellationToken).ConfigureAwait(false))
+            {
+                string name = Path.GetFileName(dependency);
+                string destination = Path.Combine(payloadRoot, name);
+                if (File.Exists(destination) || systemDependencies.Contains(dependency))
+                {
+                    continue;
+                }
+
+                if (!Path.IsPathFullyQualified(dependency) || !File.Exists(dependency))
+                {
+                    throw new ReleaseFailureException(
+                        "BundledDependencyMissing",
+                        $"Mach-O dependency '{dependency}' required by '{Path.GetFileName(path)}' could not be resolved.");
+                }
+
+                File.Copy(dependency, destination, overwrite: false);
+                components.Add(await CaptureHomebrewDependencyComponentAsync(
+                    dependency,
+                    name,
+                    payloadRoot,
+                    cancellationToken).ConfigureAwait(false));
+                pending.Enqueue(destination);
+            }
+        }
+
+        foreach (string path in EnumerateNativeFiles(payloadRoot, runtime).Order(StringComparer.Ordinal))
+        {
+            string[] dependencies = await ReadMacDependenciesAsync(
+                path,
+                payloadRoot,
+                cancellationToken).ConfigureAwait(false);
+            foreach (string dependency in dependencies)
+            {
+                if (systemDependencies.Contains(dependency))
+                {
+                    continue;
+                }
+
+                string name = Path.GetFileName(dependency);
+                string local = Path.Combine(payloadRoot, name);
+                if (!File.Exists(local))
+                {
+                    throw new ReleaseFailureException(
+                        "BundledDependencyMissing",
+                        $"Mach-O dependency '{dependency}' was not copied into the payload.");
+                }
+
+                string replacement = "@rpath/" + name;
+                if (!dependency.Equals(replacement, StringComparison.Ordinal))
+                {
+                    CommandResult change = await processRunner.RunAsync(
+                        "install_name_tool",
+                        ["-change", dependency, replacement, path],
+                        payloadRoot,
+                        TimeSpan.FromSeconds(60),
+                        cancellationToken: cancellationToken).ConfigureAwait(false);
+                    EnsureSuccess(change, "MacDependencyRewriteFailed");
+                }
+            }
+
+            if (path.EndsWith(".dylib", StringComparison.Ordinal))
+            {
+                CommandResult identity = await processRunner.RunAsync(
+                    "install_name_tool",
+                    ["-id", "@rpath/" + Path.GetFileName(path), path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(identity, "MacDependencyRewriteFailed");
+            }
+
+            CommandResult loadCommands = await processRunner.RunAsync(
+                "otool",
+                ["-l", path],
+                payloadRoot,
+                TimeSpan.FromSeconds(60),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(loadCommands, "MacDependencyRewriteFailed");
+            if (!loadCommands.StandardOutput.Contains("path @loader_path ", StringComparison.Ordinal))
+            {
+                CommandResult rpath = await processRunner.RunAsync(
+                    "install_name_tool",
+                    ["-add_rpath", "@loader_path", path],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(60),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(rpath, "MacDependencyRewriteFailed");
+            }
+        }
+
+        return components.OrderBy(item => item.FileName, StringComparer.Ordinal).ToArray();
+    }
+
+    private async Task<string[]> ReadMacDependenciesAsync(
+        string path,
+        string workingDirectory,
+        CancellationToken cancellationToken)
+    {
+        CommandResult result = await processRunner.RunAsync(
+            "otool",
+            ["-L", path],
+            workingDirectory,
+            TimeSpan.FromSeconds(60),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(result, "DynamicDependencyInspectionFailed");
+        return ParseMacDependencies(result.StandardOutput);
     }
 
     internal static bool IsBundledWindowsToolchainRuntime(string fileName) =>
@@ -572,48 +885,352 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             $"The required Windows toolchain runtime '{fileName}' was not found on the worker PATH.");
     }
 
-    private static void CopyWindowsRuntimeLicenses(string runtimePath, string fileName, string payloadRoot)
+    private async Task<BundledComponent> CopyWindowsDependencyLicensesAsync(
+        string runtimePath,
+        string fileName,
+        string payloadRoot,
+        CancellationToken cancellationToken)
     {
-        string binDirectory = Path.GetDirectoryName(runtimePath)!;
-        string prefix = Directory.GetParent(binDirectory)?.FullName
-            ?? throw new ReleaseFailureException(
+        CommandResult unixPath = await processRunner.RunAsync(
+            "cygpath",
+            ["-u", runtimePath],
+            payloadRoot,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(unixPath, "WindowsRuntimeLicenseMissing");
+        CommandResult owner = await processRunner.RunAsync(
+            "pacman",
+            ["-Qo", unixPath.StandardOutput.Trim()],
+            payloadRoot,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(owner, "WindowsRuntimeLicenseMissing");
+        const string ownerMarker = " is owned by ";
+        string ownerLine = owner.StandardOutput.Trim();
+        int marker = ownerLine.IndexOf(ownerMarker, StringComparison.Ordinal);
+        string[] ownerFields = marker < 0
+            ? []
+            : ownerLine[(marker + ownerMarker.Length)..]
+                .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        string package = ownerFields.FirstOrDefault() ?? string.Empty;
+        string version = ownerFields.Skip(1).FirstOrDefault() ?? string.Empty;
+        if (package.Length == 0 || version.Length == 0)
+        {
+            throw new ReleaseFailureException(
                 "WindowsRuntimeLicenseMissing",
-                $"The installation prefix for '{fileName}' could not be resolved.");
-        (string sourceName, string destinationName) = fileName.StartsWith(
-            "libgcc_s_",
-            StringComparison.OrdinalIgnoreCase)
-            ? ("gcc-libs", "GCC-RUNTIME")
-            : ("libwinpthread", "WINPTHREAD");
-        string source = Path.Combine(prefix, "share", "licenses", sourceName);
+                $"The package owner of dependency '{fileName}' could not be identified.");
+        }
+
+        string? packagePrefix = Environment.GetEnvironmentVariable("MINGW_PACKAGE_PREFIX");
+        string licenseName = !string.IsNullOrWhiteSpace(packagePrefix) &&
+            package.StartsWith(packagePrefix + "-", StringComparison.Ordinal)
+            ? package[(packagePrefix.Length + 1)..]
+            : package;
+        string binDirectory = Path.GetDirectoryName(runtimePath)!;
+        string prefix = Directory.GetParent(binDirectory)?.FullName ?? string.Empty;
+        string source = Path.Combine(prefix, "share", "licenses", licenseName);
         if (!Directory.Exists(source))
         {
             throw new ReleaseFailureException(
                 "WindowsRuntimeLicenseMissing",
-                $"The license directory for '{fileName}' is missing.");
+                $"The license directory for dependency '{fileName}' from package '{package}' is missing.");
         }
 
-        string destination = Path.Combine(payloadRoot, "licenses", destinationName);
-        if (Directory.Exists(destination))
+        string relativeLicensePath = Path.Combine(
+            "licenses",
+            "third-party",
+            SanitizePackageDirectory(package));
+        string destination = Path.Combine(payloadRoot, relativeLicensePath);
+        if (!Directory.Exists(destination))
         {
-            return;
+            CopyTree(source, destination);
         }
 
-        Directory.CreateDirectory(destination);
-        string[] licenseFiles = Directory.EnumerateFiles(source, "*", SearchOption.TopDirectoryOnly)
-            .Order(StringComparer.Ordinal)
-            .ToArray();
-        if (licenseFiles.Length == 0)
+        return new BundledComponent(
+            fileName,
+            package,
+            version,
+            "pacman",
+            relativeLicensePath.Replace(Path.DirectorySeparatorChar, '/'));
+    }
+
+    private async Task<BundledComponent> CaptureElfDependencyComponentAsync(
+        string runtimePath,
+        string fileName,
+        string payloadRoot,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        return runtime.Toolchain.PackageManager switch
+        {
+            "apt" => await CaptureAptDependencyComponentAsync(
+                runtimePath,
+                fileName,
+                payloadRoot,
+                cancellationToken).ConfigureAwait(false),
+            "apk" => await CaptureApkDependencyComponentAsync(
+                runtimePath,
+                fileName,
+                payloadRoot,
+                cancellationToken).ConfigureAwait(false),
+            _ => throw new ReleaseFailureException(
+                "RuntimeDependencyOwnerMissing",
+                $"No ownership inspector exists for '{runtime.Toolchain.PackageManager}'.")
+        };
+    }
+
+    private async Task<BundledComponent> CaptureAptDependencyComponentAsync(
+        string runtimePath,
+        string fileName,
+        string payloadRoot,
+        CancellationToken cancellationToken)
+    {
+        CommandResult canonicalPath = await processRunner.RunAsync(
+            "realpath",
+            [runtimePath],
+            payloadRoot,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(canonicalPath, "RuntimeDependencyOwnerMissing");
+        string ownedPath = canonicalPath.StandardOutput.Trim();
+        CommandResult owner = await processRunner.RunAsync(
+            "dpkg-query",
+            ["-S", ownedPath],
+            payloadRoot,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(owner, "RuntimeDependencyOwnerMissing");
+        string? ownerLine = owner.StandardOutput
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault(line => line.EndsWith(": " + ownedPath, StringComparison.Ordinal));
+        int delimiter = ownerLine?.LastIndexOf(": ", StringComparison.Ordinal) ?? -1;
+        string package = delimiter < 1 ? string.Empty : ownerLine![..delimiter];
+        if (package.Length == 0)
         {
             throw new ReleaseFailureException(
-                "WindowsRuntimeLicenseMissing",
-                $"The license directory for '{fileName}' is empty.");
+                "RuntimeDependencyOwnerMissing",
+                $"The Debian package owner of '{runtimePath}' could not be parsed.");
         }
 
-        foreach (string licenseFile in licenseFiles)
+        CommandResult identity = await processRunner.RunAsync(
+            "dpkg-query",
+            ["-W", "-f=${binary:Package}\\t${Version}\\n", package],
+            payloadRoot,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(identity, "RuntimeDependencyOwnerMissing");
+        string[] fields = identity.StandardOutput.Trim().Split('\t');
+        if (fields.Length != 2 || fields.Any(string.IsNullOrWhiteSpace))
         {
-            File.Copy(licenseFile, Path.Combine(destination, Path.GetFileName(licenseFile)), overwrite: false);
+            throw new ReleaseFailureException(
+                "RuntimeDependencyOwnerMissing",
+                $"The Debian package identity for '{runtimePath}' is incomplete.");
         }
+
+        string documentationPackage = fields[0].Split(':')[0];
+        string licenseSource = Path.Combine("/usr/share/doc", documentationPackage, "copyright");
+        if (!File.Exists(licenseSource))
+        {
+            throw new ReleaseFailureException(
+                "RuntimeDependencyLicenseMissing",
+                $"Debian package '{fields[0]}' has no installed copyright file.");
+        }
+
+        string relativeLicensePath = Path.Combine(
+            "licenses",
+            "third-party",
+            SanitizePackageDirectory(fields[0]));
+        string destination = Path.Combine(payloadRoot, relativeLicensePath);
+        Directory.CreateDirectory(destination);
+        string copyrightDestination = Path.Combine(destination, "copyright");
+        if (!File.Exists(copyrightDestination))
+        {
+            File.Copy(licenseSource, copyrightDestination, overwrite: false);
+        }
+
+        return new BundledComponent(
+            fileName,
+            fields[0],
+            fields[1],
+            "apt",
+            relativeLicensePath.Replace(Path.DirectorySeparatorChar, '/'));
     }
+
+    private async Task<BundledComponent> CaptureApkDependencyComponentAsync(
+        string runtimePath,
+        string fileName,
+        string payloadRoot,
+        CancellationToken cancellationToken)
+    {
+        CommandResult canonicalPath = await processRunner.RunAsync(
+            "realpath",
+            [runtimePath],
+            payloadRoot,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(canonicalPath, "RuntimeDependencyOwnerMissing");
+        CommandResult owner = await processRunner.RunAsync(
+            "apk",
+            ["info", "-Wq", canonicalPath.StandardOutput.Trim()],
+            payloadRoot,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(owner, "RuntimeDependencyOwnerMissing");
+        string package = owner.StandardOutput.Trim();
+        if (package.Length == 0 ||
+            package.Contains('\n', StringComparison.Ordinal) ||
+            package.Contains('\r', StringComparison.Ordinal))
+        {
+            throw new ReleaseFailureException(
+                "RuntimeDependencyOwnerMissing",
+                $"The Alpine package owner of '{runtimePath}' could not be parsed.");
+        }
+
+        CommandResult identity = await processRunner.RunAsync(
+            "apk",
+            ["info", "-v", package],
+            payloadRoot,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(identity, "RuntimeDependencyOwnerMissing");
+        string versionedPackage = identity.StandardOutput.Trim();
+        string prefix = package + "-";
+        if (!versionedPackage.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            throw new ReleaseFailureException(
+                "RuntimeDependencyOwnerMissing",
+                $"The Alpine package identity for '{runtimePath}' is incomplete.");
+        }
+
+        string relativeLicensePath = Path.Combine(
+            "licenses",
+            "third-party",
+            SanitizePackageDirectory(package));
+        string destination = Path.Combine(payloadRoot, relativeLicensePath);
+        if (!Directory.Exists(destination))
+        {
+            string licenseSource = Path.Combine("/usr/share/licenses", package);
+            if (Directory.Exists(licenseSource))
+            {
+                CopyTree(licenseSource, destination);
+            }
+            else
+            {
+                Directory.CreateDirectory(destination);
+                CommandResult metadata = await processRunner.RunAsync(
+                    "apk",
+                    ["info", "--all", package],
+                    payloadRoot,
+                    TimeSpan.FromSeconds(30),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                EnsureSuccess(metadata, "RuntimeDependencyLicenseMissing");
+                await File.WriteAllTextAsync(
+                    Path.Combine(destination, "APK-PACKAGE-METADATA.txt"),
+                    metadata.StandardOutput + metadata.StandardError,
+                    new UTF8Encoding(false),
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        return new BundledComponent(
+            fileName,
+            package,
+            versionedPackage[prefix.Length..],
+            "apk",
+            relativeLicensePath.Replace(Path.DirectorySeparatorChar, '/'));
+    }
+
+    private async Task<BundledComponent> CaptureHomebrewDependencyComponentAsync(
+        string runtimePath,
+        string fileName,
+        string payloadRoot,
+        CancellationToken cancellationToken)
+    {
+        CommandResult realPath = await processRunner.RunAsync(
+            "realpath",
+            [runtimePath],
+            payloadRoot,
+            TimeSpan.FromSeconds(30),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(realPath, "RuntimeDependencyOwnerMissing");
+        string resolved = realPath.StandardOutput.Trim();
+        string marker = Path.DirectorySeparatorChar + "Cellar" + Path.DirectorySeparatorChar;
+        int markerIndex = resolved.IndexOf(marker, StringComparison.Ordinal);
+        if (markerIndex < 0)
+        {
+            throw new ReleaseFailureException(
+                "RuntimeDependencyOwnerMissing",
+                $"Homebrew dependency '{runtimePath}' is not inside the Cellar.");
+        }
+
+        string[] parts = resolved[(markerIndex + marker.Length)..]
+            .Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 3)
+        {
+            throw new ReleaseFailureException(
+                "RuntimeDependencyOwnerMissing",
+                $"The Homebrew formula identity for '{runtimePath}' is incomplete.");
+        }
+
+        string formula = parts[0];
+        string version = parts[1];
+        string cellarRoot = resolved[..(markerIndex + marker.Length)] + formula + Path.DirectorySeparatorChar + version;
+        string relativeLicensePath = Path.Combine(
+            "licenses",
+            "third-party",
+            SanitizePackageDirectory(formula));
+        string destination = Path.Combine(payloadRoot, relativeLicensePath);
+        if (!Directory.Exists(destination))
+        {
+            Directory.CreateDirectory(destination);
+            string[] licenseFiles = Directory.EnumerateFiles(cellarRoot, "*", SearchOption.AllDirectories)
+                .Where(path =>
+                {
+                    string name = Path.GetFileName(path);
+                    return name.StartsWith("LICENSE", StringComparison.OrdinalIgnoreCase) ||
+                        name.StartsWith("COPYING", StringComparison.OrdinalIgnoreCase) ||
+                        name.StartsWith("NOTICE", StringComparison.OrdinalIgnoreCase) ||
+                        name.StartsWith("COPYRIGHT", StringComparison.OrdinalIgnoreCase);
+                })
+                .Where(path => new FileInfo(path).Length <= 2 * 1024 * 1024)
+                .Order(StringComparer.Ordinal)
+                .Take(64)
+                .ToArray();
+            foreach (string licenseFile in licenseFiles)
+            {
+                string relative = Path.GetRelativePath(cellarRoot, licenseFile);
+                string licenseDestination = Path.Combine(destination, relative);
+                Directory.CreateDirectory(Path.GetDirectoryName(licenseDestination)!);
+                File.Copy(licenseFile, licenseDestination, overwrite: false);
+            }
+
+            CommandResult metadata = await processRunner.RunAsync(
+                "brew",
+                ["info", "--json=v2", formula],
+                payloadRoot,
+                TimeSpan.FromSeconds(60),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(metadata, "RuntimeDependencyLicenseMissing");
+            await File.WriteAllTextAsync(
+                Path.Combine(destination, "HOMEBREW-FORMULA.json"),
+                metadata.StandardOutput,
+                new UTF8Encoding(false),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return new BundledComponent(
+            fileName,
+            formula,
+            version,
+            "homebrew",
+            relativeLicensePath.Replace(Path.DirectorySeparatorChar, '/'));
+    }
+
+    private static string SanitizePackageDirectory(string package) =>
+        new(package.Select(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '.' or '-' or '_'
+                ? character
+                : '_').ToArray());
 
     private static void NormalizeLinks(string directory)
     {
@@ -717,12 +1334,16 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         FlavorDefinition flavor,
         RuntimeDefinition runtime,
         ToolchainProvenance toolchain,
+        IReadOnlyList<BundledComponent> bundledComponents,
         IReadOnlyList<string> configureArguments)
     {
         File.WriteAllText(Path.Combine(payloadRoot, ".rid"), runtime.Rid + "\n", new UTF8Encoding(false));
         string licenses = Path.Combine(payloadRoot, "licenses");
         Directory.CreateDirectory(licenses);
-        foreach (string name in new[] { "COPYING.LGPLv2.1", "COPYING.LGPLv3", "LICENSE.md" })
+        string[] licenseFiles = flavor.Name.Equals("full", StringComparison.Ordinal)
+            ? ["COPYING.GPLv2", "COPYING.GPLv3", "COPYING.LGPLv2.1", "COPYING.LGPLv3", "LICENSE.md"]
+            : ["COPYING.LGPLv2.1", "COPYING.LGPLv3", "LICENSE.md"];
+        foreach (string name in licenseFiles)
         {
             File.Copy(Path.Combine(sourceRoot, name), Path.Combine(licenses, name), overwrite: false);
         }
@@ -731,8 +1352,11 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         Directory.CreateDirectory(notices);
         File.WriteAllText(
             Path.Combine(notices, "THIRD-PARTY-NOTICES.txt"),
-            "This initial hermetic build uses FFmpeg's in-tree components and no optional external codec library.\n" +
-            "Windows toolchain runtime DLLs, when present, are accompanied by their license texts.\n" +
+            $"This is the {flavor.Name} redistributable FFmpeg family ({flavor.LicenseExpression}).\n" +
+            "The build includes the external codec, subtitle, image, transport, and filtering libraries named in " +
+            "BUILD-METADATA/config.mak and BUILD-METADATA/configure-arguments.txt.\n" +
+            "Every application-local dependency and its owning package/version are recorded in " +
+            "BUILD-METADATA/bundled-components.json. Installed license or package-license evidence is under licenses/third-party.\n" +
             "Operating-system DLLs in BUILD-METADATA/dynamic-dependencies.txt remain host components.\n",
             new UTF8Encoding(false));
         string metadata = Path.Combine(payloadRoot, "BUILD-METADATA");
@@ -749,6 +1373,11 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         File.WriteAllBytes(
             Path.Combine(metadata, "toolchain-provenance.json"),
             JsonSerializer.SerializeToUtf8Bytes(toolchain, ReleaseJsonContext.Default.ToolchainProvenance));
+        File.WriteAllBytes(
+            Path.Combine(metadata, "bundled-components.json"),
+            JsonSerializer.SerializeToUtf8Bytes(
+                bundledComponents.ToList(),
+                ReleaseJsonContext.Default.ListBundledComponent));
         File.WriteAllText(
             Path.Combine(metadata, "source.json"),
             JsonSerializer.Serialize(
@@ -776,10 +1405,16 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             Path.Combine(metadata, "release-matrix.json"));
     }
 
-    private static void ValidateExpectedPayload(string payloadRoot, RuntimeDefinition runtime)
+    private static void ValidateExpectedPayload(
+        string payloadRoot,
+        FlavorDefinition flavor,
+        RuntimeDefinition runtime)
     {
         string suffix = runtime.Os == "windows" ? ".exe" : string.Empty;
-        foreach (string name in new[] { "ffmpeg" + suffix, "ffprobe" + suffix })
+        string[] requiredTools = flavor.IncludeFfplay
+            ? ["ffmpeg" + suffix, "ffprobe" + suffix, "ffplay" + suffix]
+            : ["ffmpeg" + suffix, "ffprobe" + suffix];
+        foreach (string name in requiredTools)
         {
             string path = Path.Combine(payloadRoot, name);
             if (!File.Exists(path))
@@ -802,7 +1437,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 path.Contains(".so", StringComparison.Ordinal) ||
                 path.EndsWith(".dylib", StringComparison.Ordinal)))
         {
-            throw new ReleaseFailureException("SharedLibrariesMissing", "The LGPL worker payload contains no shared FFmpeg libraries.");
+            throw new ReleaseFailureException("SharedLibrariesMissing", "The worker payload contains no shared FFmpeg libraries.");
         }
     }
 
@@ -1265,11 +1900,12 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 EnsureSuccess(result, "AbiCompatibilityInspectionFailed");
                 string[] minimumVersions = ParseMacMinimumOsVersions(result.StandardOutput);
                 if (minimumVersions.Length != 1 ||
-                    CompareDottedVersions(minimumVersions[0], expectedMinimum) != 0)
+                    CompareDottedVersions(minimumVersions[0], expectedMinimum) > 0)
                 {
                     throw new ReleaseFailureException(
                         "MacDeploymentTargetMismatch",
-                        $"Native file '{Path.GetFileName(path)}' does not record the exact macOS {expectedMinimum} deployment target.");
+                        $"Native file '{Path.GetFileName(path)}' requires macOS {minimumVersions.FirstOrDefault() ?? "unknown"}, " +
+                        $"above the declared macOS {expectedMinimum} boundary.");
                 }
 
                 if (!result.StandardOutput.Contains("path @loader_path ", StringComparison.Ordinal))
@@ -1342,7 +1978,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         CancellationToken cancellationToken)
     {
         string expected = ExpectedElfInterpreter(runtime);
-        foreach (string fileName in new[] { "ffmpeg", "ffprobe" })
+        foreach (string fileName in new[] { "ffmpeg", "ffprobe", "ffplay" })
         {
             string path = Path.Combine(payloadRoot, fileName);
             CommandResult result = await processRunner.RunAsync(
@@ -1492,22 +2128,26 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 bool relro = output.Contains("GNU_RELRO", StringComparison.Ordinal);
                 bool immediateBinding = output.Contains("(BIND_NOW)", StringComparison.Ordinal) ||
                     output.Contains("Flags: NOW", StringComparison.Ordinal);
-                bool stackProtector = output.Contains("__stack_chk_fail", StringComparison.Ordinal);
-                bool executablePie = fileName is not ("ffmpeg" or "ffprobe") ||
+                bool ffmpegFile = IsFfmpegPayloadFile(fileName, runtime);
+                bool stackProtector = !ffmpegFile || output.Contains("__stack_chk_fail", StringComparison.Ordinal);
+                bool executablePie = fileName is not ("ffmpeg" or "ffprobe" or "ffplay") ||
                     output
                         .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                         .Any(line => line.Contains("Flags:", StringComparison.Ordinal) &&
                                      line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
                                          .Contains("PIE", StringComparer.Ordinal));
-                if (!nonExecutableStack || !positionIndependent || !relro || !immediateBinding ||
-                    !stackProtector || !executablePie)
+                if (!nonExecutableStack || !positionIndependent || !relro ||
+                    (ffmpegFile && !immediateBinding) || !stackProtector || !executablePie)
                 {
                     throw new ReleaseFailureException(
                         "NativeHardeningMissing",
-                        $"ELF file '{fileName}' does not satisfy the NX, PIE, RELRO, immediate-binding, and stack-protector baseline.");
+                        $"ELF file '{fileName}' does not satisfy the structural hardening and FFmpeg stack-protector baseline.");
                 }
 
-                evidenceLines.Add($"{fileName}: NX stack, PIE/PIC, RELRO, BIND_NOW, stack protector");
+                evidenceLines.Add(
+                    $"{fileName}: NX stack, PIE/PIC, RELRO, " +
+                    (immediateBinding ? "BIND_NOW" : "lazy binding") +
+                    (ffmpegFile ? ", stack protector" : ", repository-built dependency"));
             }
             else if (runtime.Os == "macos")
             {
@@ -1518,7 +2158,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                     TimeSpan.FromSeconds(60),
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 EnsureSuccess(header, "HardeningInspectionFailed");
-                bool executablePie = fileName is not ("ffmpeg" or "ffprobe") ||
+                bool executablePie = fileName is not ("ffmpeg" or "ffprobe" or "ffplay") ||
                     header.StandardOutput
                         .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                         .Any(line => line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)
@@ -1530,15 +2170,18 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                     TimeSpan.FromSeconds(60),
                     cancellationToken: cancellationToken).ConfigureAwait(false);
                 EnsureSuccess(symbols, "HardeningInspectionFailed");
+                bool ffmpegFile = IsFfmpegPayloadFile(fileName, runtime);
                 if (!executablePie ||
-                    !symbols.StandardOutput.Contains("___stack_chk_fail", StringComparison.Ordinal))
+                    (ffmpegFile && !symbols.StandardOutput.Contains("___stack_chk_fail", StringComparison.Ordinal)))
                 {
                     throw new ReleaseFailureException(
                         "NativeHardeningMissing",
-                        $"Mach-O file '{fileName}' does not satisfy the PIE and stack-protector baseline.");
+                        $"Mach-O file '{fileName}' does not satisfy the PIE/PIC and FFmpeg stack-protector baseline.");
                 }
 
-                evidenceLines.Add($"{fileName}: PIE/PIC, stack protector");
+                evidenceLines.Add(
+                    $"{fileName}: PIE/PIC" +
+                    (ffmpegFile ? ", stack protector" : ", Homebrew dependency"));
             }
             else
             {
@@ -1553,6 +2196,30 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             new UTF8Encoding(false),
             cancellationToken).ConfigureAwait(false);
         return evidence;
+    }
+
+    private static bool IsFfmpegPayloadFile(string fileName, RuntimeDefinition runtime)
+    {
+        string executableSuffix = runtime.Os == "windows" ? ".exe" : string.Empty;
+        if (fileName.Equals("ffmpeg" + executableSuffix, StringComparison.OrdinalIgnoreCase) ||
+            fileName.Equals("ffprobe" + executableSuffix, StringComparison.OrdinalIgnoreCase) ||
+            fileName.Equals("ffplay" + executableSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        string[] libraryNames =
+        [
+            "avcodec",
+            "avdevice",
+            "avfilter",
+            "avformat",
+            "avutil",
+            "postproc",
+            "swresample",
+            "swscale"
+        ];
+        return libraryNames.Any(name => fileName.Contains(name, StringComparison.OrdinalIgnoreCase));
     }
 
     internal static string CanonicalizeWindowsDependencyEvidence(string evidence)
@@ -1601,8 +2268,100 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
+    private async Task ValidateFeatureContractAsync(
+        string payloadRoot,
+        FlavorDefinition flavor,
+        RuntimeDefinition runtime,
+        CancellationToken cancellationToken)
+    {
+        string suffix = runtime.Os == "windows" ? ".exe" : string.Empty;
+        string ffmpeg = Path.Combine(payloadRoot, "ffmpeg" + suffix);
+        Dictionary<string, string?> environment = CreatePayloadEnvironment(payloadRoot, runtime);
+        (string Name, IReadOnlyList<string> Required)[] inventories =
+        [
+            ("encoders", flavor.RequiredEncoders),
+            ("decoders", flavor.RequiredDecoders),
+            ("filters", flavor.RequiredFilters),
+            ("protocols", flavor.RequiredProtocols)
+        ];
+        string featureDirectory = Path.Combine(payloadRoot, "BUILD-METADATA", "features");
+        Directory.CreateDirectory(featureDirectory);
+        foreach ((string name, IReadOnlyList<string> required) in inventories)
+        {
+            CommandResult result = await processRunner.RunAsync(
+                ffmpeg,
+                ["-hide_banner", "-" + name],
+                payloadRoot,
+                SmokeTimeout,
+                environment,
+                cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(result, "FeatureInventoryFailed");
+            string evidence = result.StandardOutput + result.StandardError;
+            await File.WriteAllTextAsync(
+                Path.Combine(featureDirectory, name + ".txt"),
+                evidence,
+                new UTF8Encoding(false),
+                cancellationToken).ConfigureAwait(false);
+            HashSet<string> available = ParseFeatureInventory(evidence);
+            string[] missing = required.Where(item => !available.Contains(item)).ToArray();
+            if (missing.Length != 0)
+            {
+                throw new ReleaseFailureException(
+                    "FeatureContractIncomplete",
+                    $"The {runtime.Rid} {flavor.Name} payload is missing required {name}: {string.Join(", ", missing)}.");
+            }
+        }
+
+        if (flavor.Name.Equals("lgpl", StringComparison.Ordinal))
+        {
+            string encoderEvidence = await File.ReadAllTextAsync(
+                Path.Combine(featureDirectory, "encoders.txt"),
+                cancellationToken).ConfigureAwait(false);
+            HashSet<string> encoders = ParseFeatureInventory(encoderEvidence);
+            string[] forbidden = ["libx264", "libx265", "libxvid"];
+            if (forbidden.Any(encoders.Contains))
+            {
+                throw new ReleaseFailureException(
+                    "LgplFeatureBoundaryCrossed",
+                    "The LGPL-only payload exposes a GPL encoder.");
+            }
+        }
+
+        CommandResult ffplay = await processRunner.RunAsync(
+            Path.Combine(payloadRoot, "ffplay" + suffix),
+            ["-version"],
+            payloadRoot,
+            SmokeTimeout,
+            environment,
+            cancellationToken).ConfigureAwait(false);
+        EnsureSuccess(ffplay, "FFplaySmokeFailed");
+    }
+
+    internal static HashSet<string> ParseFeatureInventory(string evidence)
+    {
+        var features = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string line in evidence.Split(
+                     ['\r', '\n'],
+                     StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            string[] fields = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length == 1)
+            {
+                features.Add(fields[0]);
+            }
+            else if (fields.Length >= 2 && fields[0].All(character =>
+                         character == '.' || character == '-' || char.IsAsciiLetter(character)))
+            {
+                features.Add(fields[1]);
+            }
+        }
+
+        return features;
+    }
+
     private async Task RunSmokeTestAsync(
         string payloadRoot,
+        FlavorDefinition flavor,
         RuntimeDefinition runtime,
         CancellationToken cancellationToken)
     {
@@ -1610,19 +2369,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         string ffmpeg = Path.Combine(payloadRoot, "ffmpeg" + suffix);
         string ffprobe = Path.Combine(payloadRoot, "ffprobe" + suffix);
         string output = Path.Combine(payloadRoot, "smoke-output.mkv");
-        var environment = new Dictionary<string, string?>();
-        if (runtime.Os is "linux" or "linux-musl")
-        {
-            environment["LD_LIBRARY_PATH"] = payloadRoot;
-        }
-        else if (runtime.Os == "macos")
-        {
-            environment["DYLD_LIBRARY_PATH"] = payloadRoot;
-        }
-        else if (runtime.Os == "windows")
-        {
-            environment["PATH"] = string.Empty;
-        }
+        Dictionary<string, string?> environment = CreatePayloadEnvironment(payloadRoot, runtime);
 
         CommandResult generate = await processRunner.RunAsync(
             ffmpeg,
@@ -1654,6 +2401,57 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         }
 
         File.Delete(output);
+
+        (string Encoder, string[] Options)[] codecSmokes = flavor.Name.Equals("full", StringComparison.Ordinal)
+            ?
+            [
+                ("libx264", ["-preset", "ultrafast"]),
+                ("libx265", ["-preset", "ultrafast"]),
+                ("libvpx-vp9", ["-deadline", "realtime", "-cpu-used", "8"]),
+                ("libaom-av1", ["-cpu-used", "8"])
+            ]
+            :
+            [
+                ("libopenh264", []),
+                ("libvpx-vp9", ["-deadline", "realtime", "-cpu-used", "8"]),
+                ("libaom-av1", ["-cpu-used", "8"])
+            ];
+        foreach ((string encoder, string[] options) in codecSmokes)
+        {
+            CommandResult codec = await processRunner.RunAsync(
+                ffmpeg,
+                [
+                    "-nostdin", "-hide_banner", "-loglevel", "error", "-cpuflags", "0",
+                    "-f", "lavfi", "-i", "color=size=64x64:rate=1",
+                    "-frames:v", "1", "-c:v", encoder, .. options, "-f", "null", "-"
+                ],
+                payloadRoot,
+                SmokeTimeout,
+                environment,
+                cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(codec, "CodecSmokeFailed");
+        }
+    }
+
+    private static Dictionary<string, string?> CreatePayloadEnvironment(
+        string payloadRoot,
+        RuntimeDefinition runtime)
+    {
+        var environment = new Dictionary<string, string?>();
+        if (runtime.Os is "linux" or "linux-musl")
+        {
+            environment["LD_LIBRARY_PATH"] = payloadRoot;
+        }
+        else if (runtime.Os == "macos")
+        {
+            environment["DYLD_LIBRARY_PATH"] = payloadRoot;
+        }
+        else if (runtime.Os == "windows")
+        {
+            environment["PATH"] = payloadRoot;
+        }
+
+        return environment;
     }
 
     private static void RejectAbsoluteBuildPath(string payloadRoot, string buildRoot)
@@ -1733,7 +2531,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
         foreach (string file in Directory.EnumerateFiles(payloadRoot, "*", SearchOption.AllDirectories))
         {
-            bool isNative = Path.GetFileName(file) is "ffmpeg" or "ffprobe" ||
+            bool isNative = Path.GetFileName(file) is "ffmpeg" or "ffprobe" or "ffplay" ||
                 Path.GetFileName(file).Contains(".so", StringComparison.Ordinal) ||
                 file.EndsWith(".dylib", StringComparison.Ordinal);
             File.SetUnixFileMode(file, isNative ? executable : readOnlyData);

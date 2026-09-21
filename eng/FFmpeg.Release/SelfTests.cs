@@ -11,7 +11,7 @@ internal static class SelfTests
     {
         string matrixPath = Path.Combine(repositoryRoot, "eng", "release-matrix.json");
         (ReleaseMatrix matrix, string matrixHash) = MatrixLoader.Load(matrixPath);
-        Require(matrix.SchemaVersion == 3, "compatibility-policy matrix schema");
+        Require(matrix.SchemaVersion == 4, "compatibility-policy matrix schema");
         Require(matrix.RuntimeIdentifiers.Count == 9, "runtime matrix cardinality");
         Require(matrixHash.Length == 64, "matrix hash length");
         Require(
@@ -19,15 +19,34 @@ internal static class SelfTests
             MatrixLoader.ComputeCanonicalSha256("{\r\n  \"value\": 1\r\n}\r\n"u8),
             "platform-independent matrix hash");
         VersionDefinition version = matrix.Versions.Single(item => item.Status == "approved");
-        FlavorDefinition flavor = matrix.Flavors.Single();
-        ReleasePlan first = Program.CreatePlan(matrix, matrixHash, version, flavor, new string('a', 40), reducedValidation: false);
-        ReleasePlan second = Program.CreatePlan(matrix, matrixHash, version, flavor, new string('a', 40), reducedValidation: false);
+        ReleaseDefinition release = matrix.Releases.Single(item => item.Default);
+        FlavorDefinition flavor = matrix.Flavors.Single(item => item.Name == release.Flavor);
+        ReleasePlan first = Program.CreatePlan(
+            matrix,
+            matrixHash,
+            version,
+            release,
+            flavor,
+            new string('a', 40),
+            reducedValidation: false);
+        ReleasePlan second = Program.CreatePlan(
+            matrix,
+            matrixHash,
+            version,
+            release,
+            flavor,
+            new string('a', 40),
+            reducedValidation: false);
         byte[] firstBytes = JsonSerializer.SerializeToUtf8Bytes(first, ReleaseJsonContext.Default.ReleasePlan);
         byte[] secondBytes = JsonSerializer.SerializeToUtf8Bytes(second, ReleaseJsonContext.Default.ReleasePlan);
         Require(SHA256.HashData(firstBytes).SequenceEqual(SHA256.HashData(secondBytes)), "deterministic plan hash");
         Require(firstBytes.AsSpan().IndexOf("\r\n"u8) < 0, "platform-independent JSON newlines");
         Require(first.PackageIds.Count == 12, "source, core, nine runtimes, and facade packages");
         Require(first.PackageIds[^1] == "Supprocom.FFmpeg.Binaries", "facade publishes last");
+        Require(first.Version == "9.0.2" && first.PackageVersion == "9.0.2.1", "source and package versions are distinct");
+        Require(
+            matrix.Releases.Single(item => item.Flavor == "lgpl").PackageVersion == "9.0.2-lgpl.1",
+            "LGPL prerelease version contract");
         string sourceNuspec = PackageAssembler.CreateNuspec(
             "Supprocom.FFmpeg.Source",
             first,
@@ -40,9 +59,19 @@ internal static class SelfTests
                 "<license type=\"file\">licenses/FFmpeg-LICENSE.md</license>",
                 StringComparison.Ordinal) &&
             !sourceNuspec.Contains(
-                "<license type=\"expression\">LGPL-2.1-or-later</license>",
+                "<license type=\"expression\">GPL-3.0-or-later</license>",
                 StringComparison.Ordinal),
             "mixed-license source package metadata");
+        string fullNuspec = PackageAssembler.CreateNuspec(
+            "Supprocom.FFmpeg.Binaries",
+            first,
+            "Full family.",
+            [],
+            [("README.md", string.Empty)],
+            licenseExpression: flavor.LicenseExpression);
+        Require(
+            fullNuspec.Contains("<license type=\"expression\">GPL-3.0-or-later</license>", StringComparison.Ordinal),
+            "full-family package metadata");
         byte[] unsigned = CreateTestPackage("payload", signature: null);
         byte[] repositorySigned = CreateTestPackage("payload", signature: "repository-signature");
         byte[] changed = CreateTestPackage("changed-payload", signature: "repository-signature");
@@ -143,7 +172,12 @@ internal static class SelfTests
         Require(
             NativeWorker.ReadOsReleaseValue("ID=ubuntu\nVERSION_ID=\"24.04\"\n", "VERSION_ID") == "24.04",
             "OS release parsing");
-        Console.WriteLine("Self-tests passed: 31/31");
+        HashSet<string> features = NativeWorker.ParseFeatureInventory(
+            " V....D libx264 H.264 encoder\n ..C zscale Scale\nInput:\n  https\n");
+        Require(
+            features.Contains("libx264") && features.Contains("zscale") && features.Contains("https"),
+            "runtime feature inventory parsing");
+        Console.WriteLine("Self-tests passed: 35/35");
     }
 
     private static void Require(bool condition, string label)

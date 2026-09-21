@@ -45,6 +45,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         Directory.CreateDirectory(candidateDirectory);
         Directory.CreateDirectory(frozenDirectory);
         var frozen = new List<FrozenPackage>();
+        var bundledComponents = new List<(string RuntimeIdentifier, BundledComponent Component)>();
 
         string sourceCandidate = await PackSourceAsync(
             repositoryRoot,
@@ -69,6 +70,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         string coreCandidate = await PackCoreAsync(
             repositoryRoot,
             plan,
+            flavor,
             candidateDirectory,
             cancellationToken).ConfigureAwait(false);
         frozen.Add(await InspectAndFreezeAsync(
@@ -88,6 +90,32 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 workerArtifactRoot,
                 runtime,
                 cancellationToken).ConfigureAwait(false);
+            string componentManifestPath = Path.Combine(
+                payload,
+                "BUILD-METADATA",
+                "bundled-components.json");
+            List<BundledComponent> runtimeComponents = JsonSerializer.Deserialize(
+                await File.ReadAllBytesAsync(componentManifestPath, cancellationToken).ConfigureAwait(false),
+                ReleaseJsonContext.Default.ListBundledComponent)
+                ?? throw new ReleaseFailureException(
+                    "BundledComponentManifestInvalid",
+                    $"The {runtime.Rid} bundled-component manifest is empty.");
+            if (runtimeComponents.Count == 0 ||
+                runtimeComponents.Select(item => item.FileName).Distinct(StringComparer.OrdinalIgnoreCase).Count() !=
+                runtimeComponents.Count ||
+                runtimeComponents.GroupBy(
+                        item => new { item.PackageManager, item.PackageName })
+                    .Any(group => group
+                        .Select(item => new { item.PackageVersion, item.LicensePath })
+                        .Distinct()
+                        .Count() != 1))
+            {
+                throw new ReleaseFailureException(
+                    "BundledComponentManifestInvalid",
+                    $"The {runtime.Rid} bundled-component manifest is incomplete or contains duplicate files.");
+            }
+
+            bundledComponents.AddRange(runtimeComponents.Select(item => (runtime.Rid, item)));
             string runtimeCandidate = await PackRuntimeAsync(
                 repositoryRoot,
                 plan,
@@ -128,12 +156,20 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
 
         const string sbomFileName = "release.spdx.json";
         string sbomPath = Path.Combine(frozenDirectory, sbomFileName);
-        await WriteReleaseSbomAsync(sbomPath, plan, frozen, cancellationToken).ConfigureAwait(false);
+        await WriteReleaseSbomAsync(
+            sbomPath,
+            plan,
+            flavor,
+            frozen,
+            bundledComponents,
+            cancellationToken).ConfigureAwait(false);
         string sbomHash = await HashFileAsync(sbomPath, cancellationToken).ConfigureAwait(false);
         var releaseManifest = new FrozenReleaseManifest(
-            1,
+            2,
             planHash,
+            plan.Version,
             plan.PackageVersion,
+            plan.Flavor,
             plan.ReleaseProgramCommit,
             plan.MatrixSha256,
             completeRuntimeMatrix,
@@ -170,7 +206,9 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
     private static async Task WriteReleaseSbomAsync(
         string path,
         ReleasePlan plan,
+        FlavorDefinition flavor,
         IReadOnlyList<FrozenPackage> packages,
+        IReadOnlyList<(string RuntimeIdentifier, BundledComponent Component)> bundledComponents,
         CancellationToken cancellationToken)
     {
         object[] spdxPackages = packages.Select(package =>
@@ -183,11 +221,11 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 versionInfo = package.Version,
                 downloadLocation = "NOASSERTION",
                 filesAnalyzed = false,
-                licenseConcluded = isCompleteSource ? "NOASSERTION" : "LGPL-2.1-or-later",
-                licenseDeclared = isCompleteSource ? "NOASSERTION" : "LGPL-2.1-or-later",
+                licenseConcluded = isCompleteSource ? "NOASSERTION" : flavor.LicenseExpression,
+                licenseDeclared = isCompleteSource ? "NOASSERTION" : flavor.LicenseExpression,
                 licenseComments = isCompleteSource
                     ? "Complete upstream FFmpeg source archive with file-specific LGPL-2.1-or-later, GPL-2.0-or-later, GPL-3.0-or-later, MIT, BSD, Expat, and IJG terms. See licenses/FFmpeg-LICENSE.md, the four COPYING files, and notices in the source archive."
-                    : "License claim is scoped to the LGPL-configured binary/package family built with GPL and nonfree code disabled.",
+                    : $"License claim is scoped to the {flavor.Name} binary/package family; nonfree code is disabled.",
                 copyrightText = "NOASSERTION",
                 checksums = new[]
                 {
@@ -195,12 +233,62 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 }
             };
         }).ToArray();
-        object[] relationships = packages.Select(package => (object)new
+        object[] nativePackages = bundledComponents
+            .GroupBy(
+                item => new
+                {
+                    item.RuntimeIdentifier,
+                    item.Component.PackageManager,
+                    item.Component.PackageName,
+                    item.Component.PackageVersion,
+                    item.Component.LicensePath
+                })
+            .OrderBy(group => group.Key.RuntimeIdentifier, StringComparer.Ordinal)
+            .ThenBy(group => group.Key.PackageName, StringComparer.Ordinal)
+            .Select(group => (object)new
+            {
+                name = group.Key.PackageName,
+                SPDXID = NativeSpdxId(
+                    group.Key.RuntimeIdentifier,
+                    group.Key.PackageManager,
+                    group.Key.PackageName),
+                versionInfo = group.Key.PackageVersion,
+                downloadLocation = "NOASSERTION",
+                filesAnalyzed = false,
+                licenseConcluded = "NOASSERTION",
+                licenseDeclared = "NOASSERTION",
+                licenseComments =
+                    $"Bundled {group.Key.PackageManager} component for {group.Key.RuntimeIdentifier}; " +
+                    $"license evidence is packaged at runtimes/{group.Key.RuntimeIdentifier}/native/ffmpeg/{group.Key.LicensePath}.",
+                copyrightText = "NOASSERTION",
+                comment = "Bundled files: " + string.Join(", ", group
+                    .Select(item => item.Component.FileName)
+                    .Order(StringComparer.OrdinalIgnoreCase))
+            })
+            .ToArray();
+        object[] describedRelationships = packages.Select(package => (object)new
         {
             spdxElementId = "SPDXRef-DOCUMENT",
             relationshipType = "DESCRIBES",
             relatedSpdxElement = "SPDXRef-Package-" + package.Id
         }).ToArray();
+        object[] containedRelationships = bundledComponents
+            .GroupBy(item => new
+            {
+                item.RuntimeIdentifier,
+                item.Component.PackageManager,
+                item.Component.PackageName
+            })
+            .Select(group => (object)new
+            {
+                spdxElementId = "SPDXRef-Package-" + flavor.FacadePackageId + "." + group.Key.RuntimeIdentifier,
+                relationshipType = "CONTAINS",
+                relatedSpdxElement = NativeSpdxId(
+                    group.Key.RuntimeIdentifier,
+                    group.Key.PackageManager,
+                    group.Key.PackageName)
+            })
+            .ToArray();
         var document = new
         {
             spdxVersion = "SPDX-2.3",
@@ -213,8 +301,8 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 created = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture),
                 creators = new[] { "Tool: Supprocom.FFmpeg.Release-1.0" }
             },
-            packages = spdxPackages,
-            relationships
+            packages = spdxPackages.Concat(nativePackages).ToArray(),
+            relationships = describedRelationships.Concat(containedRelationships).ToArray()
         };
         await File.WriteAllTextAsync(
             path,
@@ -223,9 +311,20 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             cancellationToken).ConfigureAwait(false);
     }
 
+    private static string NativeSpdxId(string runtimeIdentifier, string packageManager, string packageName) =>
+        "SPDXRef-Native-" + SanitizeSpdxId(runtimeIdentifier) + "-" +
+        SanitizeSpdxId(packageManager) + "-" + SanitizeSpdxId(packageName);
+
+    private static string SanitizeSpdxId(string value) =>
+        new(value.Select(character =>
+            char.IsAsciiLetterOrDigit(character) || character is '.' or '-'
+                ? character
+                : '-').ToArray());
+
     private async Task<string> PackCoreAsync(
         string repositoryRoot,
         ReleasePlan plan,
+        FlavorDefinition flavor,
         string candidateDirectory,
         CancellationToken cancellationToken)
     {
@@ -241,6 +340,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 "--configuration", "Release",
                 "--output", candidateDirectory,
                 $"-p:Version={plan.PackageVersion}",
+                $"-p:PackageLicenseExpression={flavor.LicenseExpression}",
                 $"-p:RepositoryCommit={plan.ReleaseProgramCommit}",
                 "-p:IncludeSymbols=false",
                 "--nologo"
@@ -288,14 +388,17 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         string nuspec = CreateNuspec(
             packageId,
             plan,
-            "Native FFmpeg and FFprobe payload for " + runtime.Rid + ".",
+            flavor.Name.Equals("full", StringComparison.Ordinal)
+                ? "Native full redistributable GPL FFmpeg, FFprobe, and FFplay payload for " + runtime.Rid + "."
+                : "Native LGPL-only FFmpeg, FFprobe, and FFplay payload for " + runtime.Rid + ".",
             [(flavor.CorePackageId, plan.PackageVersion)],
             [
                 ("payload/**/*", $"runtimes/{runtime.Rid}/native/ffmpeg"),
                 ("runtime.props", $"buildTransitive/{packageId}.props"),
                 ("worker-manifest.json", "build-metadata"),
                 ("README.md", string.Empty)
-            ]);
+            ],
+            licenseExpression: flavor.LicenseExpression);
         return await PackNuspecAsync(root, nuspec, packageId, plan.PackageVersion, candidateDirectory, cancellationToken)
             .ConfigureAwait(false);
     }
@@ -317,6 +420,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         Directory.CreateDirectory(Path.Combine(root, "source"));
         Directory.CreateDirectory(Path.Combine(root, "build"));
         Directory.CreateDirectory(Path.Combine(root, "licenses"));
+        Directory.CreateDirectory(Path.Combine(root, "provenance", "components"));
         Directory.CreateDirectory(Path.Combine(root, "provenance", "workers"));
         Directory.CreateDirectory(Path.Combine(root, "provenance", "toolchains"));
         Directory.CreateDirectory(Path.Combine(root, "patches"));
@@ -325,6 +429,9 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         File.Copy(source.ReleaseKeyPath, Path.Combine(root, "source", Path.GetFileName(source.ReleaseKeyPath)));
         CopyTree(Path.Combine(repositoryRoot, "eng", "FFmpeg.Release"), Path.Combine(root, "build", "FFmpeg.Release"));
         File.Copy(Path.Combine(repositoryRoot, "eng", "release-matrix.json"), Path.Combine(root, "build", "release-matrix.json"));
+        File.Copy(
+            Path.Combine(repositoryRoot, "eng", "msys2-i686-packages.lock"),
+            Path.Combine(root, "build", "msys2-i686-packages.lock"));
         File.Copy(Path.Combine(repositoryRoot, "FFmpeg.Release.csproj"), Path.Combine(root, "build", "FFmpeg.Release.csproj"));
         File.Copy(Path.Combine(repositoryRoot, "global.json"), Path.Combine(root, "build", "global.json"));
         await File.WriteAllTextAsync(
@@ -346,13 +453,19 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
                 "payload",
                 "BUILD-METADATA",
                 "toolchain-provenance.json");
-            if (!File.Exists(manifest) || !File.Exists(toolchain))
+            string components = Path.Combine(
+                accepted,
+                "payload",
+                "BUILD-METADATA",
+                "bundled-components.json");
+            if (!File.Exists(manifest) || !File.Exists(toolchain) || !File.Exists(components))
             {
                 throw new ReleaseFailureException(
                     "SourceProvenanceIncomplete",
-                    $"The {runtime.Rid} source provenance is missing its worker manifest or toolchain inventory.");
+                    $"The {runtime.Rid} source provenance is missing its worker, toolchain, or bundled-component inventory.");
             }
 
+            File.Copy(components, Path.Combine(root, "provenance", "components", runtime.Rid + ".json"));
             File.Copy(manifest, Path.Combine(root, "provenance", "workers", runtime.Rid + ".json"));
             File.Copy(toolchain, Path.Combine(root, "provenance", "toolchains", runtime.Rid + ".json"));
         }
@@ -422,9 +535,10 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         string nuspec = CreateNuspec(
             flavor.FacadePackageId,
             plan,
-            "One-reference FFmpeg and FFprobe deployment for supported .NET Runtime Identifiers.",
+            "One-reference FFmpeg, FFprobe, and FFplay deployment for supported .NET Runtime Identifiers.",
             dependencies,
-            [("README.md", string.Empty)]);
+            [("README.md", string.Empty)],
+            licenseExpression: flavor.LicenseExpression);
         return await PackNuspecAsync(
             root,
             nuspec,
@@ -479,7 +593,8 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         string description,
         List<(string Id, string Version)> dependencies,
         List<(string Source, string Target)> files,
-        string? licenseFile = null)
+        string? licenseFile = null,
+        string? licenseExpression = null)
     {
         string dependencyXml = dependencies.Count == 0
             ? string.Empty
@@ -488,7 +603,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         string fileXml = string.Concat(files.Select(file =>
             $"<file src=\"{Escape(file.Source)}\" target=\"{Escape(file.Target)}\" />"));
         string licenseXml = licenseFile is null
-            ? "<license type=\"expression\">LGPL-2.1-or-later</license>"
+            ? $"<license type=\"expression\">{Escape(licenseExpression ?? throw new ArgumentNullException(nameof(licenseExpression)))}</license>"
             : $"<license type=\"file\">{Escape(licenseFile)}</license>";
         return $"""
             <?xml version="1.0" encoding="utf-8"?>
@@ -570,9 +685,10 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
         WorkerFile? toolchainFile = manifest.Files.SingleOrDefault(file => file.Path.Equals(
             "BUILD-METADATA/toolchain-provenance.json",
             StringComparison.Ordinal));
-        if (manifest.SchemaVersion != 3 ||
+        if (manifest.SchemaVersion != 4 ||
             !manifest.PlanSha256.Equals(planHash, StringComparison.Ordinal) ||
-            !manifest.Version.Equals(plan.Version, StringComparison.Ordinal) ||
+            !manifest.SourceVersion.Equals(plan.Version, StringComparison.Ordinal) ||
+            !manifest.PackageVersion.Equals(plan.PackageVersion, StringComparison.Ordinal) ||
             !manifest.SourceCommit.Equals(plan.SourceCommit, StringComparison.Ordinal) ||
             !manifest.ArchiveSha256.Equals(plan.ArchiveSha256, StringComparison.Ordinal) ||
             !manifest.Flavor.Equals(plan.Flavor, StringComparison.Ordinal) ||
@@ -586,6 +702,7 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
             string.IsNullOrWhiteSpace(manifest.AbiCompatibilityEvidence) ||
             string.IsNullOrWhiteSpace(manifest.HardeningEvidence) ||
             !manifest.Files.Any(file => file.Path.Equals("BUILD-METADATA/abi-compatibility.txt", StringComparison.Ordinal)) ||
+            !manifest.Files.Any(file => file.Path.Equals("BUILD-METADATA/bundled-components.json", StringComparison.Ordinal)) ||
             !manifest.Files.Any(file => file.Path.Equals("BUILD-METADATA/dynamic-dependencies.txt", StringComparison.Ordinal)) ||
             !manifest.Files.Any(file => file.Path.Equals("BUILD-METADATA/hardening.txt", StringComparison.Ordinal)) ||
             !manifest.Reproducible ||
@@ -716,7 +833,9 @@ internal sealed class PackageAssembler(ProcessRunner processRunner)
               RequiredSourceLicenseEntries.All(name => names.Contains(name, StringComparer.Ordinal))
             : license is not null &&
               license.Attribute("type")?.Value == "expression" &&
-              license.Value == "LGPL-2.1-or-later";
+              license.Value == (expectedVersion.Contains("-lgpl.", StringComparison.OrdinalIgnoreCase)
+                  ? "LGPL-3.0-or-later"
+                  : "GPL-3.0-or-later");
         if (repository?.Attribute("url")?.Value != "https://github.com/Supprocom/FFmpeg.Binaries.git" ||
             !validLicense ||
             !names.Contains("README.md", StringComparer.Ordinal))

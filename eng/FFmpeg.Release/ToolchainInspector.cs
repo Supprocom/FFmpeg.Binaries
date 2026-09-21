@@ -9,6 +9,7 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
     public async Task<ToolchainProvenance> InspectAndValidateAsync(
         string workingDirectory,
         RuntimeDefinition runtime,
+        FlavorDefinition flavor,
         CancellationToken cancellationToken)
     {
         string actualEnvironment = runtime.Os == "linux-musl"
@@ -23,9 +24,14 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
                 $"'{(actualEnvironment.Length == 0 ? "unidentified" : actualEnvironment)}'.");
         }
 
+        IReadOnlyDictionary<string, string> approvedPackages = ApprovedPackages(runtime.Toolchain, flavor);
         (IReadOnlyDictionary<string, string> installed, IReadOnlyList<string> inventory) =
-            await ReadInstalledPackagesAsync(workingDirectory, runtime, cancellationToken).ConfigureAwait(false);
-        foreach ((string package, string expectedVersion) in runtime.Toolchain.Packages)
+            await ReadInstalledPackagesAsync(
+                workingDirectory,
+                runtime,
+                approvedPackages.Keys,
+                cancellationToken).ConfigureAwait(false);
+        foreach ((string package, string expectedVersion) in approvedPackages)
         {
             if (!installed.TryGetValue(package, out string? actualVersion) ||
                 !actualVersion.Equals(expectedVersion, StringComparison.Ordinal))
@@ -51,16 +57,55 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
             actualEnvironment,
             runtime.Toolchain.RepositorySnapshot,
             runtime.Toolchain.PackageManager,
-            ToSortedDictionary(runtime.Toolchain.Packages),
+            ToSortedDictionary(approvedPackages),
             inventory,
             repositoryEvidence,
-            toolEvidence);
+            toolEvidence,
+            runtime.Toolchain.PackageLockSha256);
+    }
+
+    private static SortedDictionary<string, string> ApprovedPackages(
+        ToolchainDefinition toolchain,
+        FlavorDefinition flavor)
+    {
+        SortedDictionary<string, string> packages = ToSortedDictionary(toolchain.Packages);
+        AddPackages(packages, toolchain.MediaPackages);
+        if (flavor.Name.Equals("full", StringComparison.Ordinal))
+        {
+            AddPackages(packages, toolchain.FullPackages);
+        }
+
+        return packages;
+    }
+
+    private static void AddPackages(
+        SortedDictionary<string, string> destination,
+        IReadOnlyDictionary<string, string>? packages)
+    {
+        if (packages is null)
+        {
+            return;
+        }
+
+        foreach ((string name, string version) in packages)
+        {
+            if (destination.TryGetValue(name, out string? existing) &&
+                !existing.Equals(version, StringComparison.Ordinal))
+            {
+                throw new ReleaseFailureException(
+                    "ToolchainPackagePolicyConflict",
+                    $"Package '{name}' has conflicting approved versions '{existing}' and '{version}'.");
+            }
+
+            destination[name] = version;
+        }
     }
 
     private async Task<(IReadOnlyDictionary<string, string> Packages, IReadOnlyList<string> Inventory)>
         ReadInstalledPackagesAsync(
             string workingDirectory,
             RuntimeDefinition runtime,
+            IEnumerable<string> approvedPackages,
             CancellationToken cancellationToken)
     {
         return runtime.Toolchain.PackageManager switch
@@ -70,7 +115,10 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
                 ["-W", "-f=${Package}\\t${Version}\\n"],
                 workingDirectory,
                 cancellationToken).ConfigureAwait(false)),
-            "apk" => await ReadApkPackagesAsync(workingDirectory, runtime, cancellationToken).ConfigureAwait(false),
+            "apk" => await ReadApkPackagesAsync(
+                workingDirectory,
+                approvedPackages,
+                cancellationToken).ConfigureAwait(false),
             "homebrew" => await ReadHomebrewPackagesAsync(workingDirectory, runtime, cancellationToken).ConfigureAwait(false),
             "pacman" => ParseSpaceSeparatedPackages(await RunRequiredAsync(
                 "pacman",
@@ -86,7 +134,7 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
     private async Task<(IReadOnlyDictionary<string, string> Packages, IReadOnlyList<string> Inventory)>
         ReadApkPackagesAsync(
             string workingDirectory,
-            RuntimeDefinition runtime,
+            IEnumerable<string> approvedPackages,
             CancellationToken cancellationToken)
     {
         string inventoryOutput = await RunRequiredAsync(
@@ -96,7 +144,7 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
             cancellationToken).ConfigureAwait(false);
         string[] inventory = SplitLines(inventoryOutput);
         var packages = new SortedDictionary<string, string>(StringComparer.Ordinal);
-        foreach (string package in runtime.Toolchain.Packages.Keys)
+        foreach (string package in approvedPackages)
         {
             string? version = ParseApkPackageVersion(inventory, package);
             if (version is not null)
@@ -320,6 +368,13 @@ internal sealed class ToolchainInspector(ProcessRunner processRunner)
             workingDirectory,
             InspectionTimeout,
             cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (result.ExitCode != 0)
+        {
+            throw new ReleaseFailureException(
+                "ToolchainInspectionFailed",
+                $"Required toolchain evidence command '{tool}' exited with code {result.ExitCode}.");
+        }
+
         string[] lines = SplitLines(result.StandardOutput + result.StandardError);
         if (lines.Length == 0)
         {

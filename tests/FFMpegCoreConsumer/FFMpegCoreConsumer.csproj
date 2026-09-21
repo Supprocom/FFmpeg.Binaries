@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <TestRid Condition="'$(TestRid)' == ''">linux-x64</TestRid>
-    <SupprocomPackageVersion Condition="'$(SupprocomPackageVersion)' == ''">9.0.2</SupprocomPackageVersion>
+    <SupprocomPackageVersion Condition="'$(SupprocomPackageVersion)' == ''">9.0.2.1</SupprocomPackageVersion>
   </PropertyGroup>
 
   <ItemGroup>

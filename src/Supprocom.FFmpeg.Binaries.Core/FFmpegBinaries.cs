@@ -19,6 +19,9 @@ public static class FFmpegBinaries
     /// <summary>Gets the absolute path to the FFprobe executable.</summary>
     public static string FFprobePath => Path.Combine(Directory, IsWindows ? "ffprobe.exe" : "ffprobe");
 
+    /// <summary>Gets the absolute path to the FFplay executable.</summary>
+    public static string FFplayPath => Path.Combine(Directory, IsWindows ? "ffplay.exe" : "ffplay");
+
     /// <summary>Gets the FFmpeg package version.</summary>
     public static string Version =>
         typeof(FFmpegBinaries).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
@@ -35,13 +38,14 @@ public static class FFmpegBinaries
         }
     }
 
-    /// <summary>Checks that both tools exist and are executable on the current platform.</summary>
+    /// <summary>Checks that all three tools exist and are executable on the current platform.</summary>
     /// <exception cref="FileNotFoundException">A required tool is absent.</exception>
     /// <exception cref="UnauthorizedAccessException">A Unix tool lacks execute permission.</exception>
     public static void Validate()
     {
         ValidateTool(FFmpegPath);
         ValidateTool(FFprobePath);
+        ValidateTool(FFplayPath);
     }
 
     private static bool IsWindows => RuntimeInformation.IsOSPlatform(OSPlatform.Windows);

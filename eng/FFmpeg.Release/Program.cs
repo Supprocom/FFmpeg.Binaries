@@ -34,8 +34,11 @@ internal static class Program
                 return 0;
             }
 
-            VersionDefinition version = SelectVersion(matrix, options.Version);
-            FlavorDefinition flavor = matrix.Flavors.Single(item => item.Name.Equals("lgpl", StringComparison.Ordinal));
+            ReleaseDefinition release = SelectRelease(matrix, options.Version);
+            VersionDefinition version = matrix.Versions.Single(item =>
+                item.Version.Equals(release.SourceVersion, StringComparison.Ordinal));
+            FlavorDefinition flavor = matrix.Flavors.Single(item =>
+                item.Name.Equals(release.Flavor, StringComparison.Ordinal));
             var runner = new ProcessRunner();
             if (options.ConsumerGate)
             {
@@ -68,6 +71,8 @@ internal static class Program
                     matrixHash,
                     consumerCommit,
                     version,
+                    release,
+                    flavor,
                     runtime,
                     options.PackageRoot,
                     testRoot,
@@ -97,6 +102,8 @@ internal static class Program
                     matrixHash,
                     publicationCommit,
                     version,
+                    release,
+                    flavor,
                     options.PackageRoot,
                     options.AttestationRoot,
                     CancellationToken.None).ConfigureAwait(false);
@@ -108,7 +115,14 @@ internal static class Program
                 matrix.Repository.Origin,
                 options.AllowDirty,
                 CancellationToken.None).ConfigureAwait(false);
-            ReleasePlan plan = CreatePlan(matrix, matrixHash, version, flavor, releaseCommit, options.AllowDirty);
+            ReleasePlan plan = CreatePlan(
+                matrix,
+                matrixHash,
+                version,
+                release,
+                flavor,
+                releaseCommit,
+                options.AllowDirty);
             string releaseRoot = ResolveReleaseRoot(options.ReleaseRoot, repositoryRoot);
             (string planHash, string planPath) = PlanWriter.Write(releaseRoot, plan);
             string planDirectory = Path.GetDirectoryName(planPath)!;
@@ -222,6 +236,7 @@ internal static class Program
         ReleaseMatrix matrix,
         string matrixHash,
         VersionDefinition version,
+        ReleaseDefinition release,
         FlavorDefinition flavor,
         string releaseCommit,
         bool reducedValidation)
@@ -239,7 +254,7 @@ internal static class Program
             releaseCommit,
             matrixHash,
             version.Version,
-            version.Version,
+            release.PackageVersion,
             version.Tag,
             version.TagObject!,
             version.SourceCommit!,
@@ -251,20 +266,20 @@ internal static class Program
             reducedValidation);
     }
 
-    private static VersionDefinition SelectVersion(ReleaseMatrix matrix, string? requestedVersion)
+    private static ReleaseDefinition SelectRelease(ReleaseMatrix matrix, string? requestedVersion)
     {
-        VersionDefinition[] approved = matrix.Versions
+        ReleaseDefinition[] approved = matrix.Releases
             .Where(item => item.Status.Equals("approved", StringComparison.Ordinal))
             .ToArray();
         if (requestedVersion is null)
         {
-            return approved
-                .OrderByDescending(item => Version.Parse(item.Version))
-                .First();
+            return approved.Single(item => item.Default);
         }
 
-        return approved.SingleOrDefault(item => item.Version.Equals(requestedVersion, StringComparison.Ordinal))
-            ?? throw new ReleaseFailureException("VersionNotApproved", $"FFmpeg version '{requestedVersion}' is not approved for release.");
+        return approved.SingleOrDefault(item => item.PackageVersion.Equals(requestedVersion, StringComparison.Ordinal))
+            ?? throw new ReleaseFailureException(
+                "VersionNotApproved",
+                $"Package version '{requestedVersion}' is not approved for release.");
     }
 
     private static string ResolveReleaseRoot(string? configuredPath, string repositoryRoot)

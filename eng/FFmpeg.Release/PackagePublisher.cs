@@ -18,6 +18,8 @@ internal sealed class PackagePublisher(HttpClient httpClient)
         string matrixHash,
         string releaseCommit,
         VersionDefinition version,
+        ReleaseDefinition releaseDefinition,
+        FlavorDefinition flavor,
         string packageRoot,
         string attestationRoot,
         CancellationToken cancellationToken)
@@ -28,6 +30,8 @@ internal sealed class PackagePublisher(HttpClient httpClient)
             matrixHash,
             releaseCommit,
             version,
+            releaseDefinition,
+            flavor,
             packages,
             cancellationToken).ConfigureAwait(false);
         await ValidateConsumerAttestationsAsync(
@@ -172,7 +176,7 @@ internal sealed class PackagePublisher(HttpClient httpClient)
             {
                 type = "publication-complete",
                 release.PlanSha256,
-                release.Version,
+                release.PackageVersion,
                 feeds = feeds.Select(feed => feed.Name).ToArray(),
                 packageCount = release.Packages.Count,
                 utc = DateTimeOffset.UtcNow
@@ -470,6 +474,8 @@ internal sealed class PackagePublisher(HttpClient httpClient)
         string matrixHash,
         string releaseCommit,
         VersionDefinition version,
+        ReleaseDefinition releaseDefinition,
+        FlavorDefinition flavor,
         string packageRoot,
         CancellationToken cancellationToken)
     {
@@ -484,7 +490,9 @@ internal sealed class PackagePublisher(HttpClient httpClient)
             ReleaseJsonContext.Default.FrozenReleaseManifest)
             ?? throw new ReleaseFailureException("FrozenManifestInvalid", "The frozen release manifest is empty.");
         if (!release.CompleteRuntimeMatrix ||
-            !release.Version.Equals(version.Version, StringComparison.Ordinal) ||
+            !release.SourceVersion.Equals(version.Version, StringComparison.Ordinal) ||
+            !release.PackageVersion.Equals(releaseDefinition.PackageVersion, StringComparison.Ordinal) ||
+            !release.Flavor.Equals(flavor.Name, StringComparison.Ordinal) ||
             !release.MatrixSha256.Equals(matrixHash, StringComparison.Ordinal) ||
             !release.ReleaseProgramCommit.Equals(releaseCommit, StringComparison.Ordinal) ||
             release.Packages.Count != matrix.RuntimeIdentifiers.Count + 3)
@@ -581,7 +589,9 @@ internal sealed class PackagePublisher(HttpClient httpClient)
             };
             if (!attestation.PlanSha256.Equals(release.PlanSha256, StringComparison.Ordinal) ||
                 !attestation.ReleaseManifestSha256.Equals(releaseManifestHash, StringComparison.Ordinal) ||
-                !attestation.Version.Equals(release.Version, StringComparison.Ordinal) ||
+                !attestation.SourceVersion.Equals(release.SourceVersion, StringComparison.Ordinal) ||
+                !attestation.PackageVersion.Equals(release.PackageVersion, StringComparison.Ordinal) ||
+                !attestation.Flavor.Equals(release.Flavor, StringComparison.Ordinal) ||
                 !attestation.RuntimeIdentifier.Equals(runtime.Rid, StringComparison.Ordinal) ||
                 required.Except(attestation.Scenarios, StringComparer.Ordinal).Any())
             {

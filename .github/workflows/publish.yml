@@ -1,0 +1,130 @@
+name: Publish reviewed FFmpeg packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Reviewed package family
+        required: true
+        type: choice
+        options:
+          - 9.0.2.1
+          - 9.0.2-lgpl.1
+      source_run_id:
+        description: Successful push run containing the reviewed frozen family
+        required: true
+        type: string
+      source_commit:
+        description: Exact reviewed 40-character commit SHA
+        required: true
+        type: string
+      artifact_digest:
+        description: Exact GitHub artifact digest (sha256:...)
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+concurrency:
+  group: ffmpeg-publish-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  publish:
+    name: Publish exact reviewed ${{ inputs.version }} family
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Check out the reviewed commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.source_commit }}
+          persist-credentials: false
+
+      - name: Install the pinned .NET SDK
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+
+      - name: Verify reviewed run and frozen artifact identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          EXPECTED_DIGEST: ${{ inputs.artifact_digest }}
+        run: |
+          if [[ ! "${SOURCE_RUN_ID}" =~ ^[0-9]+$ ]]; then
+            echo "source_run_id must be numeric" >&2
+            exit 1
+          fi
+          if [[ ! "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_commit must be a lowercase 40-character SHA" >&2
+            exit 1
+          fi
+          if [[ ! "${EXPECTED_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "artifact_digest must be an exact sha256 digest" >&2
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = "${SOURCE_COMMIT}"
+
+          run_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")
+          test "$(jq -r .event <<<"${run_json}")" = "push"
+          test "$(jq -r .status <<<"${run_json}")" = "completed"
+          test "$(jq -r .conclusion <<<"${run_json}")" = "success"
+          test "$(jq -r .head_sha <<<"${run_json}")" = "${SOURCE_COMMIT}"
+
+          artifact_name="frozen-packages-${RELEASE_VERSION}"
+          artifacts_json=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100")
+          artifact_count=$(jq -r --arg name "${artifact_name}" '[.artifacts[] | select(.name == $name and .expired == false)] | length' <<<"${artifacts_json}")
+          test "${artifact_count}" = "1"
+          actual_digest=$(jq -r --arg name "${artifact_name}" '.artifacts[] | select(.name == $name and .expired == false) | .digest' <<<"${artifacts_json}")
+          test "${actual_digest}" = "${EXPECTED_DIGEST}"
+
+      - name: Download exact frozen package family
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: frozen-packages-${{ inputs.version }}
+          path: ${{ runner.temp }}/packages
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Download all reviewed consumer attestations
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: consumer-${{ inputs.version }}-*
+          path: ${{ runner.temp }}/consumer-attestations
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+
+      - name: Preflight, publish, and verify both package feeds
+        env:
+          SUPPROCOM_NUGET_API_KEY: ${{ secrets.SUPPROCOM_NUGET_API_KEY }}
+          SUPPROCOM_GITHUB_PACKAGES_TOKEN: ${{ github.token }}
+          SUPPROCOM_GITHUB_PACKAGES_USER: ${{ github.actor }}
+        run: >-
+          dotnet run --project FFmpeg.Release.csproj --configuration Release --
+          --publish --version "${{ inputs.version }}"
+          --package-root "${RUNNER_TEMP}/packages"
+          --attestation-root "${RUNNER_TEMP}/consumer-attestations"
+
+      - name: Preserve publication evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: publication-evidence-${{ inputs.version }}-${{ inputs.source_run_id }}
+          path: |
+            ${{ runner.temp }}/packages/release-manifest.json
+            ${{ runner.temp }}/packages/release.spdx.json
+            ${{ runner.temp }}/packages/SHA256SUMS
+            ${{ runner.temp }}/packages/publication-journal.jsonl
+          if-no-files-found: warn
+          retention-days: 30
