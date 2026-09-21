@@ -492,7 +492,7 @@ internal static class MatrixLoader
         }
 
         byte[] bytes = File.ReadAllBytes(lockPath);
-        string actualHash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+        string actualHash = ComputeCanonicalSha256(bytes);
         if (!actualHash.Equals(runtime.Toolchain.PackageLockSha256, StringComparison.Ordinal))
         {
             throw new ReleaseFailureException(
