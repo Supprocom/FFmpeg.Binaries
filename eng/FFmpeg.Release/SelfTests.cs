@@ -109,7 +109,9 @@ internal static class SelfTests
         Require(
             windows.MinimumOsVersion == "10.0.26100" &&
             windows.CpuBaseline == "x86-64-v1" &&
-            windows.SystemDependencies?.Contains("KERNEL32.dll", StringComparer.Ordinal) == true,
+            windows.SystemDependencies?.Contains("KERNEL32.dll", StringComparer.Ordinal) == true &&
+            windows.SystemDependencies.Contains("DWrite.dll", StringComparer.Ordinal) &&
+            windows.SystemDependencies.Contains("api-ms-win-crt-multibyte-l1-1-0.dll", StringComparer.Ordinal),
             "Windows compatibility boundary");
         Require(
             NativeWorker.ParseWindowsPeVersions(
@@ -135,7 +137,10 @@ internal static class SelfTests
         RuntimeDefinition mac = matrix.RuntimeIdentifiers.Single(item => item.Rid == "osx-x64");
         Require(
             mac.MinimumOsVersion == "15.0" &&
-            mac.SystemDependencies?.Contains("/usr/lib/libSystem.B.dylib", StringComparer.Ordinal) == true,
+            mac.SystemDependencies?.Contains("/usr/lib/libSystem.B.dylib", StringComparer.Ordinal) == true &&
+            mac.SystemDependencies.Contains(
+                "/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate",
+                StringComparer.Ordinal),
             "macOS compatibility boundary");
         Require(
             matrix.RuntimeIdentifiers.All(runtime => !string.IsNullOrWhiteSpace(runtime.CpuBaseline)),
