@@ -47,6 +47,13 @@ internal static class SelfTests
         Require(
             matrix.Releases.Single(item => item.Flavor == "lgpl").PackageVersion == "9.0.2-lgpl.1",
             "LGPL prerelease version contract");
+        Require(
+            matrix.Flavors.All(item =>
+                item.RequiredEncoders.Contains("libvpx", StringComparer.Ordinal) &&
+                item.RequiredDecoders.Contains("libvpx", StringComparer.Ordinal) &&
+                !item.RequiredEncoders.Contains("libvpx-vp8", StringComparer.Ordinal) &&
+                !item.RequiredDecoders.Contains("libvpx-vp8", StringComparer.Ordinal)),
+            "FFmpeg libvpx VP8 registration names");
         string sourceNuspec = PackageAssembler.CreateNuspec(
             "Supprocom.FFmpeg.Source",
             first,
@@ -181,7 +188,7 @@ internal static class SelfTests
         Require(
             features.Contains("libx264") && features.Contains("zscale") && features.Contains("https"),
             "runtime feature inventory parsing");
-        Console.WriteLine("Self-tests passed: 36/36");
+        Console.WriteLine("Self-tests passed: 37/37");
     }
 
     private static void Require(bool condition, string label)

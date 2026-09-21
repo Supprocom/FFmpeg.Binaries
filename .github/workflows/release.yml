@@ -324,15 +324,13 @@ jobs:
             nasm
             tar
             xz
-          pacboy: >-
-            toolchain:p
 
       - name: Install current 64-bit media stack
         if: matrix.rid != 'win-x86'
         shell: msys2 {0}
         run: |
           for attempt in 1 2 3 4; do
-            if pacboy -S --needed --noconfirm \
+            if pacboy -S --needed --noconfirm toolchain:p \
               SDL2:p aom:p bzip2:p dav1d:p fontconfig:p freetype:p fribidi:p gnutls:p \
               harfbuzz:p lame:p libass:p libbluray:p libiconv:p libjxl:p libsoxr:p libssh:p \
               libtheora:p libvorbis:p libvpx:p libwebp:p libxml2:p openh264:p \
@@ -364,7 +362,7 @@ jobs:
             printf '%s  %s\n' "${sha256}" "${path}" | sha256sum --check --strict
             packages+=("${path}")
           done < eng/msys2-i686-packages.lock
-          pacman -U --needed --noconfirm "${packages[@]}"
+          pacman -U --noconfirm "${packages[@]}"
 
       - name: Produce independently reproduced native payload
         shell: msys2 {0}

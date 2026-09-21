@@ -129,7 +129,7 @@
           "mingw-w64-i686-x265": "4.3-1",
           "mingw-w64-i686-xvidcore": "1.3.7-5"
         },
-        "packageLockSha256": "f98c9ca3399affab4f32f131643d80973427282a7ec8a11e17a95cb9fecc254f"
+        "packageLockSha256": "430760c20ad2110072c2461d8c4d4e83e51699a8c2f117a8db4a2d6632ccb917"
       },
       "minimumOsVersion": "10.0.26100",
       "systemDependencies": [
@@ -188,14 +188,14 @@
           "gnupg": "2.4.9-3",
           "make": "4.4.1-3",
           "mingw-w64-ucrt-x86_64-binutils": "2.47-3",
-          "mingw-w64-ucrt-x86_64-crt": "14.0.0.r409.g6de5d3b4d-1",
+          "mingw-w64-ucrt-x86_64-crt": "14.0.0.r420.g61d40c4c0-1",
           "mingw-w64-ucrt-x86_64-gcc": "16.2.0-4",
           "mingw-w64-ucrt-x86_64-gcc-libs": "16.2.0-4",
-          "mingw-w64-ucrt-x86_64-headers": "14.0.0.r409.g6de5d3b4d-1",
-          "mingw-w64-ucrt-x86_64-libwinpthread": "14.0.0.r409.g6de5d3b4d-1",
+          "mingw-w64-ucrt-x86_64-headers": "14.0.0.r420.g61d40c4c0-1",
+          "mingw-w64-ucrt-x86_64-libwinpthread": "14.0.0.r420.g61d40c4c0-1",
           "mingw-w64-ucrt-x86_64-make": "4.4.1-5",
-          "mingw-w64-ucrt-x86_64-tools": "14.0.0.r409.g6de5d3b4d-1",
-          "mingw-w64-ucrt-x86_64-winpthreads": "14.0.0.r409.g6de5d3b4d-1",
+          "mingw-w64-ucrt-x86_64-tools": "14.0.0.r420.g61d40c4c0-1",
+          "mingw-w64-ucrt-x86_64-winpthreads": "14.0.0.r420.g61d40c4c0-1",
           "msys2-runtime": "3.6.10-4",
           "nasm": "2.16.03-1",
           "tar": "1.35-3",
@@ -959,7 +959,7 @@
         "hevc",
         "libaom-av1",
         "libdav1d",
-        "libvpx-vp8",
+        "libvpx",
         "libvpx-vp9"
       ],
       "requiredFilters": [
@@ -1042,7 +1042,7 @@
         "hevc",
         "libaom-av1",
         "libdav1d",
-        "libvpx-vp8",
+        "libvpx",
         "libvpx-vp9"
       ],
       "requiredFilters": [

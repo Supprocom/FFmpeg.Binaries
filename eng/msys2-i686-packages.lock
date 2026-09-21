@@ -103,6 +103,7 @@ mingw-w64-i686-sqlite3	3.53.4-1	mingw-w64-i686-sqlite3-3.53.4-1-any.pkg.tar.zst	
 mingw-w64-i686-srt	1.5.6-1	mingw-w64-i686-srt-1.5.6-1-any.pkg.tar.zst	a8cad3683b7ff8b1becdb583f8610b5805dac64f99883b546805907ee786050d
 mingw-w64-i686-tcl	8.6.18-1	mingw-w64-i686-tcl-8.6.18-1-any.pkg.tar.zst	debd51f44e63ce7c33b7233b9881dd2489abedc74ecc17a6820baaa8c2fe7f64
 mingw-w64-i686-tk	8.6.18-1	mingw-w64-i686-tk-8.6.18-1-any.pkg.tar.zst	6fe926b455cc7414a09864f0870050303d38432c715e00f9f20c8a7c79524e7f
+mingw-w64-i686-tools	14.0.0.r409.g6de5d3b4d-1	mingw-w64-i686-tools-14.0.0.r409.g6de5d3b4d-1-any.pkg.tar.zst	1571c3e7f862b22635f757330a16aad7ba814f21d2f1d6db30ce1f0f8f2c0669
 mingw-w64-i686-tzdata	2026d-1	mingw-w64-i686-tzdata-2026d-1-any.pkg.tar.zst	ad0e794be20b36a73ab9d303ed911551d75f87147a6a07b99daf4201db9ec924
 mingw-w64-i686-vamp-plugin-sdk	2.10.0-3	mingw-w64-i686-vamp-plugin-sdk-2.10.0-3-any.pkg.tar.zst	c97eb57b424d6df55fe2b9554b8c33b432c1a8b9a41d5e2dbfb5b099c152ce8b
 mingw-w64-i686-vid.stab	1.1.1-1	mingw-w64-i686-vid.stab-1.1.1-1-any.pkg.tar.zst	95de0f4083f71d4f42d4c4b214edee66682956b0487be216b614de0f3f04b3b3

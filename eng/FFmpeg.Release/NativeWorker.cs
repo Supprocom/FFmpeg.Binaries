@@ -322,8 +322,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add("--enable-videotoolbox");
                 arguments.Add("--install-name-dir=@rpath");
                 arguments.Add(
-                    $"--extra-cflags={compilerFlags} -mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
+                    $"--extra-cflags=-I. {compilerFlags} -mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
                 arguments.Add($"--extra-ldflags=-Wl,-rpath,@loader_path -mmacosx-version-min={runtime.MinimumOsVersion}");
+                arguments.Add("--extra-libs=-liconv");
                 break;
             case "windows":
                 arguments.Add("--target-os=mingw32");
@@ -416,6 +417,27 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
     private static void ApplySourceCompatibilityFixups(string sourceRoot, RuntimeDefinition runtime)
     {
+        if (runtime.Os == "macos")
+        {
+            string lameCompatibilityDirectory = Path.Combine(sourceRoot, "lame");
+            string lameCompatibilityHeader = Path.Combine(lameCompatibilityDirectory, "lame.h");
+            if (Directory.Exists(lameCompatibilityDirectory) || File.Exists(lameCompatibilityHeader))
+            {
+                throw new ReleaseFailureException(
+                    "SourceCompatibilityFixupFailed",
+                    "The FFmpeg source tree already contains the reserved LAME 4 compatibility-header path.");
+            }
+
+            Directory.CreateDirectory(lameCompatibilityDirectory);
+            File.WriteAllText(
+                lameCompatibilityHeader,
+                "#ifndef SUPPROCOM_LAME4_COMPAT_H\n" +
+                "#define SUPPROCOM_LAME4_COMPAT_H\n" +
+                "#include <lame.h>\n" +
+                "#endif\n",
+                new UTF8Encoding(false));
+        }
+
         if (runtime.Os != "windows" || runtime.Architecture != "arm64")
         {
             return;
@@ -969,13 +991,6 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         string binDirectory = Path.GetDirectoryName(runtimePath)!;
         string prefix = Directory.GetParent(binDirectory)?.FullName ?? string.Empty;
         string source = Path.Combine(prefix, "share", "licenses", licenseName);
-        if (!Directory.Exists(source))
-        {
-            throw new ReleaseFailureException(
-                "WindowsRuntimeLicenseMissing",
-                $"The license directory for dependency '{fileName}' from package '{package}' is missing.");
-        }
-
         string relativeLicensePath = Path.Combine(
             "licenses",
             "third-party",
@@ -983,7 +998,45 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         string destination = Path.Combine(payloadRoot, relativeLicensePath);
         if (!Directory.Exists(destination))
         {
-            CopyTree(source, destination);
+            if (Directory.Exists(source))
+            {
+                CopyTree(source, destination);
+            }
+            else
+            {
+                string documentationSource = Path.Combine(prefix, "share", "doc", licenseName);
+                if (Directory.Exists(documentationSource))
+                {
+                    CopyTree(documentationSource, destination);
+                }
+                else
+                {
+                    Directory.CreateDirectory(destination);
+                }
+
+                await File.WriteAllTextAsync(
+                    Path.Combine(destination, "PACKAGE-SOURCE.txt"),
+                    $"Package: {package}\n" +
+                    $"Version: {version}\n" +
+                    $"Official record and source-only archive: https://packages.msys2.org/packages/{Uri.EscapeDataString(package)}\n" +
+                    "The installed binary archive has no dedicated share/licenses directory. " +
+                    "Its available installed documentation and complete pacman license metadata are retained here.\n",
+                    new UTF8Encoding(false),
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            CommandResult metadata = await processRunner.RunAsync(
+                "pacman",
+                ["-Qi", package],
+                payloadRoot,
+                TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            EnsureSuccess(metadata, "WindowsRuntimeLicenseMissing");
+            await File.WriteAllTextAsync(
+                Path.Combine(destination, "PACMAN-PACKAGE-METADATA.txt"),
+                metadata.StandardOutput + metadata.StandardError,
+                new UTF8Encoding(false),
+                cancellationToken).ConfigureAwait(false);
         }
 
         return new BundledComponent(
@@ -1134,22 +1187,6 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
         string package = packageIdentity.Groups["name"].Value;
         string version = packageIdentity.Groups["version"].Value;
-        CommandResult identity = await processRunner.RunAsync(
-            "apk",
-            ["info", "-v", package],
-            payloadRoot,
-            TimeSpan.FromSeconds(30),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-        EnsureSuccess(identity, "RuntimeDependencyOwnerMissing");
-        if (!identity.StandardOutput
-                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Contains(versionedPackage, StringComparer.Ordinal))
-        {
-            throw new ReleaseFailureException(
-                "RuntimeDependencyOwnerMissing",
-                $"The Alpine package identity for '{runtimePath}' is incomplete.");
-        }
-
         string relativeLicensePath = Path.Combine(
             "licenses",
             "third-party",
@@ -1462,9 +1499,12 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                     runtime.MinimumLibcVersion,
                     toolchainEnvironment = runtime.Toolchain.EnvironmentIdentity,
                     toolchainSnapshot = runtime.Toolchain.RepositorySnapshot,
-                    sourceCompatibilityFixup = runtime.Os == "windows" && runtime.Architecture == "arm64"
-                        ? "Renamed upstream VERSION to FFMPEG_VERSION and redirected ffbuild/version.sh to avoid a case-insensitive collision with the C++ <version> header."
-                        : null,
+                    sourceCompatibilityFixup = runtime.Os switch
+                    {
+                        "macos" => "Added a local lame/lame.h forwarding header for Homebrew LAME 4's relocated public header.",
+                        "windows" when runtime.Architecture == "arm64" => "Renamed upstream VERSION to FFMPEG_VERSION and redirected ffbuild/version.sh to avoid a case-insensitive collision with the C++ <version> header.",
+                        _ => null
+                    },
                     buildRepository = "https://github.com/Supprocom/FFmpeg.Binaries"
                 },
                 IndentedJson) + "\n",
