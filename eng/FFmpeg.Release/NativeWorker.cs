@@ -312,6 +312,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add("--extra-ldflags=-Wl,-z,relro,-z,now");
                 break;
             case "macos":
+                string homebrewPrefix = runtime.Architecture == "arm64" ? "/opt/homebrew" : "/usr/local";
                 arguments.Add("--target-os=darwin");
                 arguments.Add($"--arch={ToConfigureArchitecture(runtime.Architecture)}");
                 arguments.Add("--enable-pthreads");
@@ -322,8 +323,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add("--enable-videotoolbox");
                 arguments.Add("--install-name-dir=@rpath");
                 arguments.Add(
-                    $"--extra-cflags=-I. {compilerFlags} -mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
-                arguments.Add($"--extra-ldflags=-Wl,-rpath,@loader_path -mmacosx-version-min={runtime.MinimumOsVersion}");
+                    $"--extra-cflags=-I{homebrewPrefix}/include {compilerFlags} -mmacosx-version-min={runtime.MinimumOsVersion} -fstack-protector-strong");
+                arguments.Add(
+                    $"--extra-ldflags=-L{homebrewPrefix}/lib -Wl,-rpath,@loader_path -mmacosx-version-min={runtime.MinimumOsVersion}");
                 arguments.Add("--extra-libs=-liconv");
                 break;
             case "windows":
@@ -417,27 +419,6 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
 
     private static void ApplySourceCompatibilityFixups(string sourceRoot, RuntimeDefinition runtime)
     {
-        if (runtime.Os == "macos")
-        {
-            string lameCompatibilityDirectory = Path.Combine(sourceRoot, "lame");
-            string lameCompatibilityHeader = Path.Combine(lameCompatibilityDirectory, "lame.h");
-            if (Directory.Exists(lameCompatibilityDirectory) || File.Exists(lameCompatibilityHeader))
-            {
-                throw new ReleaseFailureException(
-                    "SourceCompatibilityFixupFailed",
-                    "The FFmpeg source tree already contains the reserved LAME 4 compatibility-header path.");
-            }
-
-            Directory.CreateDirectory(lameCompatibilityDirectory);
-            File.WriteAllText(
-                lameCompatibilityHeader,
-                "#ifndef SUPPROCOM_LAME4_COMPAT_H\n" +
-                "#define SUPPROCOM_LAME4_COMPAT_H\n" +
-                "#include <lame.h>\n" +
-                "#endif\n",
-                new UTF8Encoding(false));
-        }
-
         if (runtime.Os != "windows" || runtime.Architecture != "arm64")
         {
             return;
@@ -1499,12 +1480,9 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                     runtime.MinimumLibcVersion,
                     toolchainEnvironment = runtime.Toolchain.EnvironmentIdentity,
                     toolchainSnapshot = runtime.Toolchain.RepositorySnapshot,
-                    sourceCompatibilityFixup = runtime.Os switch
-                    {
-                        "macos" => "Added a local lame/lame.h forwarding header for Homebrew LAME 4's relocated public header.",
-                        "windows" when runtime.Architecture == "arm64" => "Renamed upstream VERSION to FFMPEG_VERSION and redirected ffbuild/version.sh to avoid a case-insensitive collision with the C++ <version> header.",
-                        _ => null
-                    },
+                    sourceCompatibilityFixup = runtime.Os == "windows" && runtime.Architecture == "arm64"
+                        ? "Renamed upstream VERSION to FFMPEG_VERSION and redirected ffbuild/version.sh to avoid a case-insensitive collision with the C++ <version> header."
+                        : null,
                     buildRepository = "https://github.com/Supprocom/FFmpeg.Binaries"
                 },
                 IndentedJson) + "\n",

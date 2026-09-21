@@ -129,7 +129,7 @@
           "mingw-w64-i686-x265": "4.3-1",
           "mingw-w64-i686-xvidcore": "1.3.7-5"
         },
-        "packageLockSha256": "430760c20ad2110072c2461d8c4d4e83e51699a8c2f117a8db4a2d6632ccb917"
+        "packageLockSha256": "2f883e5d4e10c1d861bee3aed697416cc1208359b8155994af53d5078aa3a5ba"
       },
       "minimumOsVersion": "10.0.26100",
       "systemDependencies": [

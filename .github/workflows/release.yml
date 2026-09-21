@@ -324,13 +324,14 @@ jobs:
             nasm
             tar
             xz
+          pacboy: ${{ fromJSON('{"win-x86":"","win-x64":"toolchain:p","win-arm64":"toolchain:p"}')[matrix.rid] }}
 
       - name: Install current 64-bit media stack
         if: matrix.rid != 'win-x86'
         shell: msys2 {0}
         run: |
           for attempt in 1 2 3 4; do
-            if pacboy -S --needed --noconfirm toolchain:p \
+            if pacboy -S --needed --noconfirm \
               SDL2:p aom:p bzip2:p dav1d:p fontconfig:p freetype:p fribidi:p gnutls:p \
               harfbuzz:p lame:p libass:p libbluray:p libiconv:p libjxl:p libsoxr:p libssh:p \
               libtheora:p libvorbis:p libvpx:p libwebp:p libxml2:p openh264:p \
