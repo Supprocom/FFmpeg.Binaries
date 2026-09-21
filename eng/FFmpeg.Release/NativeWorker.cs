@@ -312,7 +312,7 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                 arguments.Add("--extra-ldflags=-Wl,-z,relro,-z,now");
                 break;
             case "macos":
-                string homebrewPrefix = runtime.Architecture == "arm64" ? "/opt/homebrew" : "/usr/local";
+                string homebrewPrefix = HomebrewPrefix(runtime);
                 arguments.Add("--target-os=darwin");
                 arguments.Add($"--arch={ToConfigureArchitecture(runtime.Architecture)}");
                 arguments.Add("--enable-pthreads");
@@ -782,16 +782,17 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
                     continue;
                 }
 
-                if (!Path.IsPathFullyQualified(dependency) || !File.Exists(dependency))
+                string? source = ResolveMacDependencySource(dependency, runtime);
+                if (source is null)
                 {
                     throw new ReleaseFailureException(
                         "BundledDependencyMissing",
                         $"Mach-O dependency '{dependency}' required by '{Path.GetFileName(path)}' could not be resolved.");
                 }
 
-                File.Copy(dependency, destination, overwrite: false);
+                File.Copy(source, destination, overwrite: false);
                 components.Add(await CaptureHomebrewDependencyComponentAsync(
-                    dependency,
+                    source,
                     name,
                     payloadRoot,
                     cancellationToken).ConfigureAwait(false));
@@ -865,6 +866,27 @@ internal sealed class NativeWorker(ProcessRunner processRunner)
         }
 
         return components.OrderBy(item => item.FileName, StringComparer.Ordinal).ToArray();
+    }
+
+    private static string HomebrewPrefix(RuntimeDefinition runtime) =>
+        runtime.Architecture == "arm64" ? "/opt/homebrew" : "/usr/local";
+
+    private static string? ResolveMacDependencySource(string dependency, RuntimeDefinition runtime)
+    {
+        if (Path.IsPathFullyQualified(dependency))
+        {
+            return File.Exists(dependency) ? dependency : null;
+        }
+
+        if (!dependency.StartsWith("@rpath/", StringComparison.Ordinal) &&
+            !dependency.StartsWith("@loader_path/", StringComparison.Ordinal) &&
+            !dependency.StartsWith("@executable_path/", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        string candidate = Path.Combine(HomebrewPrefix(runtime), "lib", Path.GetFileName(dependency));
+        return File.Exists(candidate) ? candidate : null;
     }
 
     private async Task<string[]> ReadMacDependenciesAsync(
