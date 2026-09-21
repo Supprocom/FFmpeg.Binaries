@@ -273,6 +273,16 @@ jobs:
           --release-root "${RUNNER_TEMP}/release"
           --worker-output-root "${RUNNER_TEMP}/worker-artifacts"
 
+      - name: Preserve failed reproducibility payloads
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: reproducibility-diagnostic-${{ matrix.version }}-${{ matrix.rid }}
+          path: ${{ runner.temp }}/release/${{ matrix.version }}/*/workers/${{ matrix.rid }}/independent-builds
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 2
+
       - name: Upload accepted worker evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
