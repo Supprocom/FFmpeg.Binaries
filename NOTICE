@@ -1,0 +1,24 @@
+Supprocom.FFmpeg.Binaries: packaging, verification, and distribution tooling
+Copyright (C) 2026 mkn8rn
+Contact: supprocom@mkn8rn.com
+
+Original Supprocom material in this repository is free software. You can
+redistribute it and/or modify it under the terms of the GNU Affero General
+Public License as published by the Free Software Foundation, version 3.
+
+Original Supprocom material is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the LICENSE file.
+
+Bundled or vendored FFmpeg source, binaries, and other third-party material
+retain their respective licenses. See LICENSE.md, the COPYING files, packaged
+license inventories, and file-specific notices for those terms.
+
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+
+WRITTEN OFFER
+
+The source files for the Supprocom project can be freely obtained at:
+https://github.com/Supprocom/FFmpeg.Binaries
+
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
